@@ -9,6 +9,11 @@ syncs, and nothing is merged here.
   with a link to that sync. One that is not taken is closed after a while.
 - Contributions are accepted under this repository's [license](LICENSE).
 
+Accepted contributions are published through bot-authored sync commits. We
+close accepted pull requests with a link to the sync containing the change.
+Sync commits do not preserve contributor authorship or include contributor
+credit trailers. Applicable copyright and license notices are retained.
+
 Before sending a change, run:
 
 ```bash
