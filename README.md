@@ -10,6 +10,8 @@ Nothing to configure.
 - Swift 6.2 or later to build it, which the Command Line Tools ship on a
   recent enough macOS (`xcode-select --install`). Check with
   `swift --version`. The core library alone builds and tests with Swift 6.0.
+- To run the tests, Xcode or a toolchain from swift.org; the Command Line
+  Tools aren't enough. See [Development](#development).
 - The [GitHub CLI](https://cli.github.com), logged in: `gh auth status`. See
   [Authentication](#authentication) for the scopes it needs.
 
@@ -42,13 +44,39 @@ For a quick look without installing, `swift run` starts it from the checkout.
 ## Development
 
 `script/check` lints, builds and tests everything, the AppKit window
-included. It needs the swift.org toolchain named in `.swift-version`; the
-Command Line Tools' Swift has no Swift Testing.
+included. The tests need Swift Testing, and the Command Line Tools' Swift
+can't load it: with only those, `script/check` stops at
+`no such module 'Testing'`. You need one of the two setups below.
+
+**If you have Xcode** (check with `ls -d /Applications/Xcode.app`), you need
+nothing else. Open Xcode once and let it finish installing its components,
+then in Terminal, from the checkout:
 
 ```bash
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 swift format --in-place --recursive Package.swift Sources Tests
 script/check
 ```
+
+The `export` lasts only for that Terminal window; run it again in a new one.
+
+**If you don't have Xcode**, install swiftly, swift.org's toolchain
+installer, by following [swift.org/install/macos](https://www.swift.org/install/macos/).
+Then, from the checkout:
+
+```bash
+swiftly install    # installs the version named in .swift-version
+swift --version    # should name that version
+swift format --in-place --recursive Package.swift Sources Tests
+script/check
+```
+
+If `swift --version` still names an older Swift, open a new Terminal window
+so swiftly's PATH change takes effect.
+
+Changes are checked with the toolchain named in `.swift-version`. Xcode's
+`swift format` can format a few things differently; where they disagree,
+that version's formatting is the one that counts.
 
 The app's behavior lives in `Sources/GhInboxCore`, which has no AppKit and
 builds and tests on Linux too; `Sources/GhInbox` is the AppKit window around

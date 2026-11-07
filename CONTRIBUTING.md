@@ -14,7 +14,8 @@ close accepted pull requests with a link to the sync containing the change.
 Sync commits do not preserve contributor authorship or include contributor
 credit trailers. Applicable copyright and license notices are retained.
 
-Before sending a change, run:
+Before sending a change, run the following, after setting up Swift as the
+README's [Development](README.md#development) section describes:
 
 ```bash
 swift format --in-place --recursive Package.swift Sources Tests

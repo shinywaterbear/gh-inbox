@@ -8,7 +8,7 @@ private let rowHeight: CGFloat = 36
 @MainActor
 final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
   let scrollView = NSScrollView()
-  private let table = NSTableView()
+  private let table = HoverTable()
   private var shown = Rows()
   private var inbox = Inbox()
   var onLoadMore: (Int) -> Void = { _ in }
@@ -32,12 +32,17 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     scrollView.documentView = table
     scrollView.hasVerticalScroller = true
     scrollView.drawsBackground = false
+    scrollView.contentView.postsBoundsChangedNotifications = true
+    NotificationCenter.default.addObserver(
+      table, selector: #selector(HoverTable.updateHover), name: NSView.boundsDidChangeNotification,
+      object: scrollView.contentView)
   }
 
   func show(_ rows: Rows, of inbox: Inbox) {
     shown = rows
     self.inbox = inbox
     table.reloadData()
+    table.updateHover()
   }
 
   func numberOfRows(in tableView: NSTableView) -> Int { shown.rows.count }
@@ -46,6 +51,7 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
   func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
     let view = HoverRow()
+    view.hovering = row == table.hoveredRow
     switch shown.rows[row] {
     case .heading(_, let first, _):
       // A rule above every section but the first, which sits under the header's.
@@ -216,32 +222,56 @@ final class DotView: NSView {
   }
 }
 
-/// Highlights a clickable row under the pointer and draws a section's rule.
-final class HoverRow: NSTableRowView {
-  var clickable = false
-  var ruled = false
-  private var hovering = false {
-    didSet { needsDisplay = true }
+/// Tracks the one row under the pointer. Per-row tracking areas miss exits
+/// when rows scroll out from under a still pointer, leaving several lit.
+final class HoverTable: NSTableView {
+  private(set) var hoveredRow = -1 {
+    didSet {
+      guard hoveredRow != oldValue else { return }
+      for row in [oldValue, hoveredRow] where row >= 0 && row < numberOfRows {
+        (rowView(atRow: row, makeIfNecessary: false) as? HoverRow)?.hovering = row == hoveredRow
+      }
+    }
   }
 
   override func updateTrackingAreas() {
     super.updateTrackingAreas()
-    trackingAreas.forEach(removeTrackingArea)
-    guard clickable else { return }
+    trackingAreas.filter { $0.owner === self }.forEach(removeTrackingArea)
     addTrackingArea(
       NSTrackingArea(
-        rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+        rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+        owner: self))
   }
 
-  override func mouseEntered(with event: NSEvent) { hovering = true }
-  override func mouseExited(with event: NSEvent) { hovering = false }
+  override func mouseEntered(with event: NSEvent) { updateHover() }
+  override func mouseMoved(with event: NSEvent) { updateHover() }
+  override func mouseExited(with event: NSEvent) { hoveredRow = -1 }
+
+  /// Recomputes the hovered row from the pointer's current position.
+  @objc func updateHover() {
+    guard let window, window.isKeyWindow else {
+      hoveredRow = -1
+      return
+    }
+    let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    hoveredRow = visibleRect.contains(point) ? row(at: point) : -1
+  }
+}
+
+/// Highlights a clickable hovered row and draws a section's rule.
+final class HoverRow: NSTableRowView {
+  var clickable = false
+  var ruled = false
+  var hovering = false {
+    didSet { if hovering != oldValue { needsDisplay = true } }
+  }
 
   override func resetCursorRects() {
     if clickable { addCursorRect(bounds, cursor: .pointingHand) }
   }
 
   override func drawBackground(in dirtyRect: NSRect) {
-    if hovering {
+    if hovering && clickable {
       NSColor.quaternaryLabelColor.setFill()
       bounds.fill()
     }
