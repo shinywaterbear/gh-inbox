@@ -21,16 +21,14 @@ elif [ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" = "$root" ]; th
 	fi
 fi
 
-cargo build --release --locked
-target_dir="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
-version="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+swift build -c release --product gh-inbox
+binary="$(swift build -c release --show-bin-path)/gh-inbox"
 app="$root/dist/GhInbox.app"
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$target_dir/release/gh-inbox" "$app/Contents/MacOS/gh-inbox"
+cp "$binary" "$app/Contents/MacOS/gh-inbox"
 cp "$root/Resources/Info.plist" "$app/Contents/Info.plist"
-plutil -replace CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
 # Which commit this bundle was built from, for an installer to compare with its pin.
 if [ -n "$revision" ]; then
 	plutil -replace SourceRevision -string "$revision" "$app/Contents/Info.plist"

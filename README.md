@@ -1,12 +1,14 @@
 # gh-inbox
 
 Your open PRs, review requests, assignments and personal-repo work, inferred from
-the `gh` account, in a [GPUI](https://gpui.rs) window.
+the `gh` account, in a native macOS window.
 
 ```bash
 gh auth status   # the app shells out to gh
-cargo run
+swift run        # or script/build for dist/GhInbox.app
 ```
+
+It needs macOS 14 and Swift 6 (the Command Line Tools' or swift.org's).
 
 `cmd-r` refreshes, `cmd-q` quits, and clicking a row opens it in the browser.
 

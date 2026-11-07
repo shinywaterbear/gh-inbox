@@ -17,7 +17,6 @@ credit trailers. Applicable copyright and license notices are retained.
 Before sending a change, run:
 
 ```bash
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo test
+swift format --in-place --recursive Package.swift Sources Tests
+script/check
 ```

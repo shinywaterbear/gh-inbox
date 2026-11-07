@@ -1,8 +1,0 @@
-# Added to the review section's search only, to tell a direct request from
-# a team's. pageInfo matters: a cut-off list may hide the viewer.
-fragment requests on PullRequest {
-  reviewRequests(first: 25) {
-    pageInfo { hasNextPage }
-    nodes { requestedReviewer { __typename ... on Actor { login } ... on Team { name } } }
-  }
-}

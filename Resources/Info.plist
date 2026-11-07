@@ -10,6 +10,8 @@
 	<string>io.github.shinywaterbear.gh-inbox</string>
 	<key>CFBundleName</key>
 	<string>gh-inbox</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>

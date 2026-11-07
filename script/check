@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Lint, build and test. The pre-commit hook runs it; CI runs it on Linux, where
+# the AppKit shell drops out and only the core is built and tested.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+# Check the bash scripts present in this tree.
+# bash -n checks only its first file; the rest become positional parameters.
+for script in script/* .githooks/*; do
+	if [ -f "$script" ] && { [ "${script%.sh}" != "$script" ] || head -1 "$script" | grep -q bash; }; then
+		bash -n "$script"
+	fi
+done
+swift format lint --strict --recursive Package.swift Sources Tests
+swift build
+swift test
