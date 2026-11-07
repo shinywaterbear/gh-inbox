@@ -1,0 +1,22 @@
+# The fields fetched for every section's search; github.rs builds each
+# section's query around it. Check states come separately (checks.graphql):
+# they roughly doubled a page's latency.
+fragment items on SearchResultItemConnection {
+  issueCount
+  pageInfo { hasNextPage }
+  nodes {
+    __typename
+    ... on PullRequest {
+      id number title url updatedAt isDraft reviewDecision headRefOid
+      author { login }
+      repository { name nameWithOwner owner { __typename } }
+      # reviewDecision is null unless a branch rule requires reviews.
+      latestOpinionatedReviews(first: 50) { pageInfo { hasNextPage } nodes { state } }
+    }
+    ... on Issue {
+      id number title url updatedAt
+      author { login }
+      repository { name nameWithOwner owner { __typename } }
+    }
+  }
+}

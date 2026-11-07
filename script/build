@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Build dist/GhInbox.app from a release build, ad-hoc signed. Installing it is left to the caller.
+# Usage: script/build [--revision <commit>]; without one, the checkout's HEAD is recorded.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd -P)"
+cd "$root"
+
+revision=""
+if [ "${1:-}" = "--revision" ]; then
+	revision="${2:?--revision needs a commit}"
+elif [ $# -gt 0 ]; then
+	echo "usage: script/build [--revision <commit>]" >&2
+	exit 2
+# A copy without .git (a GitHub zip) records nothing; nor does one unpacked
+# inside another repository, whose HEAD would otherwise be recorded.
+elif [ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" = "$root" ]; then
+	revision="$(git -C "$root" rev-parse HEAD)"
+	if [ -n "$(git -C "$root" status --porcelain)" ]; then
+		revision="$revision-dirty"
+	fi
+fi
+
+cargo build --release --locked
+target_dir="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+version="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+app="$root/dist/GhInbox.app"
+
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp "$target_dir/release/gh-inbox" "$app/Contents/MacOS/gh-inbox"
+cp "$root/Resources/Info.plist" "$app/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
+# Which commit this bundle was built from, for an installer to compare with its pin.
+if [ -n "$revision" ]; then
+	plutil -replace SourceRevision -string "$revision" "$app/Contents/Info.plist"
+fi
+
+# The icon set macOS expects, from the 512-pixel source; 512@2x would only upscale it.
+iconset="$(mktemp -d)/AppIcon.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256; do
+	sips -z "$size" "$size" "$root/assets/icon.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+	double=$((size * 2))
+	sips -z "$double" "$double" "$root/assets/icon.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+cp "$root/assets/icon.png" "$iconset/icon_512x512.png"
+iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+rm -rf "$(dirname "$iconset")"
+
+codesign --force --options runtime --sign - "$app"
+codesign --verify --strict "$app"
+echo "$app"

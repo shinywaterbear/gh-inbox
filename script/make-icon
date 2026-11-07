@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Redraws assets/icon.png from script/make-icon.swift (needs the Command Line Tools).
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+# Compiled rather than interpreted: the swift JIT does not link AppKit.
+swiftc -sdk "$(xcrun --show-sdk-path)" -framework AppKit \
+    "$root/script/make-icon.swift" -o "$work/make-icon"
+"$work/make-icon" "$root/assets/icon.png"
+sips -Z 512 "$root/assets/icon.png" >/dev/null

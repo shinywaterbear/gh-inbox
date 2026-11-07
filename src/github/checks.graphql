@@ -1,0 +1,33 @@
+# A PR's check state looked up by id, plus the checks its base branch
+# requires: GitHub's rollup omits a required check that never reported.
+fragment checks on PullRequest {
+  id headRefOid
+  commits(last: 1) { nodes { commit { ...rollup } } }
+  # The test merge commit: when it has a status, it is what must pass.
+  potentialMergeCommit { ...rollup }
+  baseRef {
+    branchProtectionRule { requiredStatusCheckContexts }
+    rules(first: 100) {
+      nodes {
+        parameters {
+          __typename
+          ... on RequiredStatusChecksParameters { requiredStatusChecks { context } }
+        }
+      }
+    }
+  }
+}
+
+fragment rollup on Commit {
+  statusCheckRollup {
+    state
+    contexts(first: 100) {
+      totalCount
+      nodes {
+        __typename
+        ... on CheckRun { name }
+        ... on StatusContext { context }
+      }
+    }
+  }
+}
