@@ -35,7 +35,8 @@ For a quick look without installing, `swift run` starts it from the checkout.
 
 - Sections: awaiting your review, your open PRs, assigned to you, and what's
   left in repos you own. An item shows once, in the first section that has it.
-- Click a row to open it in the browser. `cmd-r` refreshes and `cmd-q` quits.
+- Click a row to open it in the browser, or select it with the arrow keys
+  and press Return. `cmd-r` refreshes and `cmd-q` quits.
   It also refreshes on its own every 2 minutes while focused, every 10 in the
   background.
 - "Direct only" hides review requests that reached you through a team. The
@@ -79,8 +80,8 @@ Changes are checked with the toolchain named in `.swift-version`. Xcode's
 that version's formatting is the one that counts.
 
 The app's behavior lives in `Sources/GhInboxCore`, which has no AppKit and
-builds and tests on Linux too; `Sources/GhInbox` is the AppKit window around
-it. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change.
+builds and tests on Linux too; `Sources/GhInboxUI` is the AppKit window around
+it and `Sources/GhInbox` the app that opens it. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change.
 
 ## Authentication
 

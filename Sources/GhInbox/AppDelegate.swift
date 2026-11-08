@@ -1,4 +1,5 @@
 import AppKit
+import GhInboxUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -9,12 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = InboxController()
     NSApp.mainMenu = menu(refresh: controller)
     self.controller = controller
-    if background {
-      controller.window?.orderBack(nil)
-    } else {
-      controller.showWindow(nil)
-      NSApp.activate()
-    }
+    controller.showWindow(nil)
+    NSApp.activate()
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

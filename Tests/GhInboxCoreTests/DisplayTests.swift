@@ -22,28 +22,108 @@ private func loaded(_ answers: [SectionFetch]) -> Inbox {
   return inbox
 }
 
+private let noon = ISO8601DateFormatter().date(from: "2026-11-08T12:00:00Z")!
+
+/// A fixed moment in a fixed place, so wording never depends on the machine.
+private func at(_ instant: Instant = .now, _ date: Date = noon) -> Now {
+  Now(
+    instant: instant, date: date, timeZone: TimeZone(identifier: "UTC")!, locale: Locale(identifier: "en_US"))
+}
+
+private func notices(_ rows: [RowModel]) -> [Notice] {
+  rows.compactMap { if case .notice(let notice) = $0.content { notice } else { nil } }
+}
+
 struct DisplayTests {
   @Test func rowsListHeadingsItemsAndOneRowForACutOffSection() {
     let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([issue("b")]), ok([])])
-    let shown = rows(inbox, now: .now)
-    #expect(shown.rows.first == .heading(section: 0, first: true, shown: 1))
-    #expect(shown.rows.contains(.item(section: 0, index: 0)))
-    #expect(inbox.sections[0].canLoadMore)
+    let shown = rows(inbox, now: at())
     #expect(
-      shown.rows.contains(
-        .cutOff(
-          section: 0, note: "Showing the newest 1 of 60 matches",
-          url: searchURL(0, host: "github.com", directOnly: false))))
-    #expect(shown.rows.contains(.heading(section: 1, first: false, shown: 0)))
-    #expect(!shown.multiOwner)
+      shown.map(\.id).prefix(3) == [.heading(section: 0), .item(section: 0, url: "a"), .cutOff(section: 0)])
+    #expect(
+      shown.first?.content
+        == .heading(HeadingRow(name: "Awaiting my review", mark: .count(1, dim: false), ruled: false)))
+    #expect(
+      shown[2].content
+        == .cutOff(
+          CutOffRow(
+            section: 0, more: .button("Load 25 more"), note: "Showing the newest 1 of 60 matches",
+            url: searchURL(0, host: "github.com", directOnly: false))))
+    #expect(
+      shown[3].content == .heading(HeadingRow(name: "My open PRs", mark: .count(0, dim: true), ruled: true)))
+    #expect(shown.compactMap { if case .item(let item) = $0.content { item.owner } else { nil } }.isEmpty)
+  }
+
+  @Test func anItemRowCarriesEverythingItShows() {
+    var item = pr("a", "h")
+    item.review = .approved
+    item.reviewRoute = .team("platform")
+    item.author = "ravi"
+    item.updatedAt = "2026-11-08T09:00:00Z"
+    let row = itemRow(
+      item, check: .known(checks: .passing, stale: false), multiOwner: true, viewer: "me", now: at())
+    #expect(row.owner == "o")
+    #expect(row.repo == "r")
+    #expect(row.kind == .approved)
+    #expect(row.route == "via platform")
+    #expect(row.author == "ravi")
+    #expect(row.age == "3h")
+    // The date reads in the reader's own format, which varies by platform.
+    let updated = "updated " + localTime(date("2026-11-08T09:00:00Z")!, now: at())
+    #expect(row.toolTip == "t\no/r #1 · \(updated)\nReview request: via platform")
+    #expect(
+      row.accessibilityLabel
+        == "Pull request, t, o/r #1, Approved, checks passing, via platform, by ravi, \(updated)"
+    )
+    #expect(itemRow(item, check: nil, multiOwner: false, viewer: "ravi", now: at()).author == "")
+  }
+
+  @Test func aTickRewordsOnlyTheRowsWhoseTextMoved() {
+    var failing = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([])])
+    let then = ContinuousClock.now
+    failing.sections[0].error = .server("502")
+    failing.sections[0].fetchedAt = then
+    let before = rows(failing, now: at(then, noon))
+    let after = rows(failing, now: at(then + .seconds(180), noon))
+    let error = GhError.server("502").described
+    #expect(notices(before).first?.text == "\(error) Showing results from just now.")
+    #expect(notices(after).first?.text.hasSuffix("from 3m ago.") == true)
+    #expect(changes(from: before, to: after) == RowChanges(removed: [], inserted: [], updated: [1]))
+    #expect(changes(from: after, to: after).isEmpty)
+  }
+
+  @Test func rowChangesKeepRowsWhoseIdentityStays() {
+    let first = loaded([ok([pr("a", "h"), pr("b", "h")]), ok([]), ok([]), ok([])])
+    let second = loaded([ok([pr("b", "h"), pr("c", "h")]), ok([]), ok([]), ok([])])
+    let old = rows(first, now: at())
+    let new = rows(second, now: at())
+    let diff = changes(from: old, to: new)
+    // "a" left and "c" arrived; "b" moved up but is the same row.
+    #expect(diff.removed.map { old[$0].id } == [.item(section: 0, url: "a")])
+    #expect(diff.inserted.map { new[$0].id } == [.item(section: 0, url: "c")])
+    #expect(diff.updated.isEmpty)
+  }
+
+  @Test func arrowKeysSkipRowsThatDoNothing() {
+    let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([issue("b")]), ok([])])
+    let shown = rows(inbox, now: at())
+    let items = shown.indices.filter { shown[$0].action != nil }
+    #expect(items.count == 2)
+    #expect(nextSelectable(shown, from: nil, step: 1) == items[0])
+    #expect(nextSelectable(shown, from: nil, step: -1) == items[1])
+    // Past the cut-off row and the empty section's heading.
+    #expect(nextSelectable(shown, from: items[0], step: 1) == items[1])
+    #expect(nextSelectable(shown, from: items[1], step: -1) == items[0])
+    #expect(nextSelectable(shown, from: items[1], step: 1) == nil)
+    #expect(nextSelectable(shown, from: items[0], step: -1) == nil)
   }
 
   @Test func aCutOffNoteNamesTheShownCountOnlyWhenItDiffers() {
     var inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([]), ok([])])
     // The fixture's repository has no owner type, so the Personal tab drops it.
     inbox.ownerFilter = .personal
-    let notes = rows(inbox, now: .now).rows.compactMap { row -> String? in
-      if case .cutOff(_, let note, _) = row { note } else { nil }
+    let notes = rows(inbox, now: at()).compactMap { row -> String? in
+      if case .cutOff(let cut) = row.content { cut.note } else { nil }
     }
     #expect(notes == ["0 shown of the newest 1 of 60 matches, before the Personal/Org filter"])
   }
@@ -75,24 +155,14 @@ struct DisplayTests {
     #expect(headingMark(section, shown: 3) == .count(3, dim: false))
   }
 
-  @Test func aNoticeKeepsItsAgeOutOfItsIdentity() {
-    let then = ContinuousClock.now
-    let notice = Notice(text: "GitHub had a server error: 502.", tone: .error, since: then)
-    #expect(notice.text(now: then) == "GitHub had a server error: 502. Showing results from just now.")
-    #expect(notice.text(now: then + .seconds(180)).hasSuffix("from 3m ago."))
-    #expect(Notice(text: "x", tone: .warning).text(now: then) == "x")
-  }
-
   @Test func thePinnedHeadingIsTheNearestAboveTheFirstVisibleRow() {
-    let shown: [Row] = [
-      .heading(section: 0, first: true, shown: 2), .item(section: 0, index: 0), .item(section: 0, index: 1),
-      .heading(section: 1, first: false, shown: 1), .item(section: 1, index: 0),
-    ]
+    let inbox = loaded([ok([pr("a", "h"), pr("b", "h")]), ok([pr("c", "h")]), ok([]), ok([])])
+    let shown = rows(inbox, now: at())
     #expect(pinnedHeading(shown, firstVisible: 0) == 0)
     #expect(pinnedHeading(shown, firstVisible: 2) == 0)
     #expect(pinnedHeading(shown, firstVisible: 3) == 3)
     #expect(pinnedHeading(shown, firstVisible: 4) == 3)
-    #expect(pinnedHeading(shown, firstVisible: 5) == nil)
+    #expect(pinnedHeading(shown, firstVisible: shown.count) == nil)
   }
 
   @Test func onlySectionFetchesCountAsRetrying() {
@@ -110,7 +180,7 @@ struct DisplayTests {
     var draft = pr("d", "h")
     draft.isDraft = true
     let inbox = loaded([ok([pr("a", "h"), draft]), ok([]), ok([issue("b")]), ok([])])
-    let head = header(inbox, rows: rows(inbox, now: .now).rows, now: .now)
+    let head = header(inbox, rows: rows(inbox, now: at()), now: at())
     #expect(head.title == "Open for me")
     #expect(head.summary == "2 PRs (1 draft) · 1 issue · updated just now")
     #expect(!head.busy)
@@ -118,7 +188,7 @@ struct DisplayTests {
 
   @Test func bannersNameTheSharedFailureAndFailedChecks() {
     let inbox = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([])])
-    let shown = banners(inbox)
+    let shown = banners(inbox, now: at())
     #expect(shown.count == 1)
     #expect(
       shown.first?.text.hasPrefix("Couldn't load checks for 1 PR: GitHub had a server error: 502.") == true
@@ -139,21 +209,24 @@ struct DisplayTests {
   }
 
   @Test func agesAreCompactAndTurnIntoDates() {
-    let now = ISO8601DateFormatter().date(from: "2026-11-08T12:00:00Z")!
-    let utc = TimeZone(identifier: "UTC")!
-    #expect(age("2026-11-08T11:59:30Z", now: now, timeZone: utc) == "now")
-    #expect(age("2026-11-08T11:15:00Z", now: now, timeZone: utc) == "45m")
-    #expect(age("2026-11-07T13:00:00Z", now: now, timeZone: utc) == "23h")
-    #expect(age("2026-11-02T12:00:00Z", now: now, timeZone: utc) == "6d")
-    #expect(age("2026-10-12T12:00:00Z", now: now, timeZone: utc) == "3w")
-    #expect(age("2026-09-30T12:00:00Z", now: now, timeZone: utc) == "Sep 30")
-    #expect(age("2025-12-01T00:00:00Z", now: now, timeZone: utc) == "Dec 1, 2025")
-    #expect(age("not a date", now: now, timeZone: utc) == nil)
-    #expect(age("2026-11-08T11:14:59.500Z", now: now, timeZone: utc) == "45m")
-    #expect(age("2026-11-08T12:05:00Z", now: now, timeZone: utc) == "now")
-    // Old enough to show a date: the reader's zone decides which day it was.
-    #expect(
-      age("2026-10-01T03:00:00Z", now: now, timeZone: TimeZone(identifier: "America/Los_Angeles")!)
-        == "Sep 30")
+    #expect(age("2026-11-08T11:59:30Z", now: at()) == "now")
+    #expect(age("2026-11-08T11:15:00Z", now: at()) == "45m")
+    #expect(age("2026-11-07T13:00:00Z", now: at()) == "23h")
+    #expect(age("2026-11-02T12:00:00Z", now: at()) == "6d")
+    #expect(age("2026-10-12T12:00:00Z", now: at()) == "3w")
+    #expect(age("2026-09-30T12:00:00Z", now: at()) == "Sep 30")
+    #expect(age("2025-12-01T00:00:00Z", now: at()) == "Dec 1, 2025")
+    #expect(age("not a date", now: at()) == nil)
+    #expect(age("2026-11-08T11:14:59.500Z", now: at()) == "45m")
+    #expect(age("2026-11-08T12:05:00Z", now: at()) == "now")
+    // Old enough to show a date: the reader's zone decides which day it was,
+    // and their locale how it reads.
+    var west = at()
+    west.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    #expect(age("2026-10-01T03:00:00Z", now: west) == "Sep 30")
+    var german = at()
+    german.locale = Locale(identifier: "de_DE")
+    #expect(age("2026-09-30T12:00:00Z", now: german) == "30. Sept.")
   }
+
 }

@@ -7,61 +7,153 @@ public enum Tone: Sendable, Equatable {
   case error, warning
 }
 
-/// A problem to show, whose age can move without new data: `since` is when
-/// the results it describes arrived. Equal notices stay equal as that age
-/// grows, so nothing is rebuilt (closing a tooltip) just because time passed.
+/// The moment a render describes: ages and "updated" notes are read from it,
+/// so a tick is just a render at a later moment.
+public struct Now: Sendable {
+  public var instant: Instant
+  public var date: Date
+  public var timeZone: TimeZone
+  public var locale: Locale
+
+  public init(
+    instant: Instant = .now, date: Date = Date(), timeZone: TimeZone = .current, locale: Locale = .current
+  ) {
+    self.instant = instant
+    self.date = date
+    self.timeZone = timeZone
+    self.locale = locale
+  }
+}
+
+/// A problem to show, as a row or a banner, worded as of a `Now`.
 public struct Notice: Sendable, Equatable {
   public var text: String
   public var tone: Tone
-  public var since: Instant?
 
-  public init(text: String, tone: Tone, since: Instant? = nil) {
+  public init(text: String, tone: Tone) {
     self.text = text
     self.tone = tone
-    self.since = since
-  }
-
-  /// The full text as of `now`.
-  public func text(now: Instant) -> String {
-    since.map { "\(text) Showing results from \(ago($0, now))." } ?? text
   }
 }
 
-/// A list row, pointing into `Inbox` rather than copying items.
-public enum Row: Sendable, Equatable {
-  case heading(section: Int, first: Bool, shown: Int)
+/// A row's identity across renders, so a list can update rows in place.
+public enum RowID: Sendable, Hashable {
+  case heading(section: Int)
+  /// The section's error first, then its warnings.
+  case notice(section: Int, ordinal: Int)
+  case item(section: Int, url: String)
+  case cutOff(section: Int)
+}
+
+public struct HeadingRow: Sendable, Equatable {
+  public var name: String
+  public var mark: HeadingMark
+  /// A rule above it: every section but the first.
+  public var ruled: Bool
+}
+
+/// Everything an item's row shows.
+public struct ItemRow: Sendable, Equatable {
+  public var url: String
+  /// Only when several owners show; the row then reads "owner/".
+  public var owner: String?
+  public var repo: String
+  public var number: Int
+  public var title: String
+  public var kind: Kind
+  public var dot: Dot
+  public var route: String?
+  /// Blank when it's the viewer.
+  public var author: String
+  public var age: String
+  public var toolTip: String
+  public var accessibilityLabel: String
+}
+
+/// A section with more matches than fetched: what the page holds and the
+/// full search.
+public struct CutOffRow: Sendable, Equatable {
+  public enum More: Sendable, Equatable {
+    case button(String)
+    case loading
+    /// At GitHub's largest page; only the full search is left.
+    case none
+  }
+
+  public var section: Int
+  public var more: More
+  public var note: String
+  public var url: String
+}
+
+public enum RowContent: Sendable, Equatable {
+  case heading(HeadingRow)
   /// Truncated to one row; the full text is a hover away, and a click
   /// copies it.
   case notice(Notice)
-  case item(section: Int, index: Int)
-  /// A section with more matches than fetched: what the page holds, the
-  /// full search, and "Load more" while `SectionView.canLoadMore`.
-  case cutOff(section: Int, note: String, url: String)
+  case item(ItemRow)
+  /// Only its buttons act: a near-miss on "Load more" shouldn't open the
+  /// browser.
+  case cutOff(CutOffRow)
 }
 
-public struct Rows: Sendable {
-  public var rows: [Row] = []
-  /// Items from more than one owner are shown, so repos need their owner.
-  public var multiOwner = false
-
-  public init() {}
+/// What clicking a row, or pressing Return on it, does.
+public enum RowAction: Sendable, Equatable {
+  case open(String)
+  case copy(String)
 }
 
-public func rows(_ inbox: Inbox, now: Instant) -> Rows {
-  var result = Rows()
-  var owners = Set<Substring>()
-  let common = inbox.commonError != nil
-  for (s, (section, shown)) in zip(inbox.sections, inbox.visible()).enumerated() {
-    result.rows.append(.heading(section: s, first: result.rows.isEmpty, shown: shown.count))
-    if let error = section.error, !common {
-      result.rows.append(.notice(Notice(text: error.described, tone: .error, since: section.fetchedAt)))
+public struct RowModel: Sendable, Equatable, Identifiable {
+  public var id: RowID
+  public var content: RowContent
+
+  public var isHeading: Bool {
+    if case .heading = content { true } else { false }
+  }
+
+  public var action: RowAction? {
+    switch content {
+    case .heading, .cutOff: nil
+    case .notice(let notice): .copy(notice.text)
+    case .item(let item): .open(item.url)
     }
-    for warning in section.warnings {
-      result.rows.append(.notice(Notice(text: warning.described, tone: .warning)))
+  }
+
+  public var toolTip: String? {
+    switch content {
+    case .heading: nil
+    case .notice(let notice): "\(notice.text)\n\nClick to copy."
+    case .item(let item): item.toolTip
+    case .cutOff(let cut): cut.note
+    }
+  }
+}
+
+public func rows(_ inbox: Inbox, now: Now) -> [RowModel] {
+  var result: [RowModel] = []
+  let common = inbox.commonError != nil
+  let shown = inbox.visible()
+  let owners = Set(
+    zip(inbox.sections, shown).flatMap { section, shown in shown.map { section.items[$0].owner } })
+  let viewer = inbox.identity?.login
+  for (s, (section, shown)) in zip(inbox.sections, shown).enumerated() {
+    let heading = HeadingRow(
+      name: section.name, mark: headingMark(section, shown: shown.count), ruled: !result.isEmpty)
+    result.append(RowModel(id: .heading(section: s), content: .heading(heading)))
+    var notices: [Notice] = []
+    if let error = section.error, !common {
+      let age = section.fetchedAt.map { " Showing results from \(ago($0, now.instant))." } ?? ""
+      notices.append(Notice(text: error.described + age, tone: .error))
+    }
+    notices += section.warnings.map { Notice(text: $0.described, tone: .warning) }
+    for (ordinal, notice) in notices.enumerated() {
+      result.append(RowModel(id: .notice(section: s, ordinal: ordinal), content: .notice(notice)))
     }
     for index in shown {
-      owners.insert(section.items[index].owner)
-      result.rows.append(.item(section: s, index: index))
+      let item = section.items[index]
+      let row = itemRow(
+        item, check: inbox.check(item), multiOwner: owners.count > 1, viewer: viewer, now: now)
+      result.append(RowModel(id: .item(section: s, url: item.url), content: .item(row)))
     }
     if section.truncated {
       // The owner tabs filter only what's already fetched.
@@ -71,11 +163,40 @@ public func rows(_ inbox: Inbox, now: Instant) -> Rows {
       let fetched = "the newest \(section.returned) of \(section.total) matches\(beforeFilter)"
       let note = shown.count == section.returned ? "Showing \(fetched)" : "\(shown.count) shown of \(fetched)"
       let url = searchURL(s, host: inbox.identity?.host ?? "github.com", directOnly: inbox.reviewDirectOnly)
-      result.rows.append(.cutOff(section: s, note: note, url: url))
+      let more: CutOffRow.More =
+        section.expanding ? .loading : section.canLoadMore ? .button("Load \(pageStep) more") : .none
+      let cut = CutOffRow(section: s, more: more, note: note, url: url)
+      result.append(RowModel(id: .cutOff(section: s), content: .cutOff(cut)))
     }
   }
-  result.multiOwner = owners.count > 1
   return result
+}
+
+func itemRow(_ item: Item, check: CheckView?, multiOwner: Bool, viewer: String?, now: Now) -> ItemRow {
+  let kind = Kind(item)
+  let dot = Dot(check)
+  let route = routeLabel(item.reviewRoute)
+  let author = item.author == viewer ? "" : item.author
+  let updated = date(item.updatedAt).map { localTime($0, now: now) } ?? item.updatedAt
+  let place = "\(item.repository.nameWithOwner) #\(item.number)"
+  // The route too: a narrow row may have no room to show it.
+  let toolTip =
+    "\(item.title)\n\(place) · updated \(updated)" + (route.map { "\nReview request: \($0)" } ?? "")
+  let spoken = [
+    kind.spokenName, item.title, place, kind.badge, dot.spoken, route, author.isEmpty ? nil : "by \(author)",
+    "updated \(updated)",
+  ]
+  return ItemRow(
+    url: item.url, owner: multiOwner ? String(item.owner) : nil, repo: item.repository.name,
+    number: item.number, title: item.title, kind: kind, dot: dot, route: route, author: author,
+    age: age(item.updatedAt, now: now) ?? "", toolTip: toolTip,
+    accessibilityLabel: spoken.compactMap { $0 }.joined(separator: ", "))
+}
+
+/// The timestamp in the reader's own zone and format.
+func localTime(_ date: Date, now: Now) -> String {
+  date.formatted(
+    Date.FormatStyle(date: .abbreviated, time: .shortened, locale: now.locale, timeZone: now.timeZone))
 }
 
 /// A section is being fetched: what a retry of a failed load waits on. The
@@ -117,16 +238,13 @@ public struct Header: Sendable, Equatable {
   public var busy: Bool
 }
 
-public func header(_ inbox: Inbox, rows: [Row], now: Instant) -> Header {
+public func header(_ inbox: Inbox, rows: [RowModel], now: Now) -> Header {
   var (prs, drafts, issues) = (0, 0, 0)
-  for case .item(let section, let index) in rows {
-    let item = inbox.sections[section].items[index]
-    if item.isDraft {
-      drafts += 1
-    } else if item.isPullRequest {
-      prs += 1
-    } else {
-      issues += 1
+  for case .item(let item) in rows.map(\.content) {
+    switch item.kind {
+    case .draft: drafts += 1
+    case .issue: issues += 1
+    case .pullRequest, .approved, .changes: prs += 1
     }
   }
   let busy = inbox.anyBusy
@@ -141,7 +259,7 @@ public func header(_ inbox: Inbox, rows: [Row], now: Instant) -> Header {
     if busy {
       summary.append("refreshing…")
     } else if let updated = inbox.updated {
-      summary.append("updated \(ago(updated, now))")
+      summary.append("updated \(ago(updated, now.instant))")
     }
   }
   let title =
@@ -154,10 +272,11 @@ public func header(_ inbox: Inbox, rows: [Row], now: Instant) -> Header {
 }
 
 /// Problems that aren't tied to a section, above the list; long ones show in full on hover.
-public func banners(_ inbox: Inbox) -> [Notice] {
+public func banners(_ inbox: Inbox, now: Now) -> [Notice] {
   var result: [Notice] = []
   if let error = inbox.commonError {
-    result.append(Notice(text: "Couldn't refresh: \(error.described)", tone: .error, since: inbox.updated))
+    let age = inbox.updated.map { " Showing results from \(ago($0, now.instant))." } ?? ""
+    result.append(Notice(text: "Couldn't refresh: \(error.described)\(age)", tone: .error))
   }
   if let (count, error) = inbox.checkFailures() {
     result.append(
@@ -168,9 +287,48 @@ public func banners(_ inbox: Inbox) -> [Notice] {
 
 /// The heading pinned over the top of the list when `firstVisible` is the
 /// first row in view: the nearest heading at or above it.
-public func pinnedHeading(_ rows: [Row], firstVisible: Int) -> Int? {
+public func pinnedHeading(_ rows: [RowModel], firstVisible: Int) -> Int? {
   guard rows.indices.contains(firstVisible) else { return nil }
-  return rows[...firstVisible].lastIndex { if case .heading = $0 { true } else { false } }
+  return rows[...firstVisible].lastIndex(where: \.isHeading)
+}
+
+/// The row an arrow key moves the selection to: the nearest row past
+/// `from` in `step`'s direction that acts, skipping headings and cut-off
+/// rows. With nothing selected, the first such row from that end.
+public func nextSelectable(_ rows: [RowModel], from: Int?, step: Int) -> Int? {
+  let start = from.map { $0 + step } ?? (step > 0 ? 0 : rows.count - 1)
+  return stride(from: start, to: step > 0 ? rows.count : -1, by: step > 0 ? 1 : -1)
+    .first { rows.indices.contains($0) && rows[$0].action != nil }
+}
+
+/// How to turn one list of rows into another without rebuilding the rows
+/// that stay: rows whose identity left or arrived, and rows kept whose
+/// content changed.
+public struct RowChanges: Sendable, Equatable {
+  /// Indexes into the old rows.
+  public var removed: [Int]
+  /// Indexes into the new rows.
+  public var inserted: [Int]
+  /// Indexes into the new rows.
+  public var updated: [Int]
+
+  public var isEmpty: Bool { removed.isEmpty && inserted.isEmpty && updated.isEmpty }
+}
+
+public func changes(from old: [RowModel], to new: [RowModel]) -> RowChanges {
+  let difference = new.map(\.id).difference(from: old.map(\.id))
+  var removed: [Int] = []
+  var inserted: [Int] = []
+  for change in difference {
+    switch change {
+    case .remove(let offset, _, _): removed.append(offset)
+    case .insert(let offset, _, _): inserted.append(offset)
+    }
+  }
+  let arrived = Set(inserted)
+  let before = Dictionary(old.map { ($0.id, $0.content) }, uniquingKeysWith: { first, _ in first })
+  let updated = new.indices.filter { !arrived.contains($0) && before[new[$0].id] != new[$0].content }
+  return RowChanges(removed: removed.sorted(), inserted: inserted.sorted(), updated: updated)
 }
 
 public enum Kind: Sendable, Equatable {
@@ -183,6 +341,13 @@ public enum Kind: Sendable, Equatable {
     case (true, false, .approved): self = .approved
     case (true, false, .changesRequested): self = .changes
     case (true, false, _): self = .pullRequest
+    }
+  }
+
+  var spokenName: String {
+    switch self {
+    case .issue: "Issue"
+    case .draft, .approved, .changes, .pullRequest: "Pull request"
     }
   }
 
@@ -201,8 +366,6 @@ public enum Kind: Sendable, Equatable {
 func counted(_ n: Int, _ noun: String) -> String {
   "\(n) \(noun)\(n == 1 ? "" : "s")"
 }
-
-private let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 /// Formatters are costly to make and every row parses a timestamp; the lock
 /// keeps sharing them safe where Foundation doesn't promise it.
@@ -226,11 +389,11 @@ public func date(_ timestamp: String) -> Date? {
 }
 
 /// How long ago an RFC 3339 timestamp was, compactly: "now", "5m", "3h",
-/// "2d", "3w", then the date in `timeZone`. Nil when the timestamp doesn't
-/// parse.
-public func age(_ timestamp: String, now: Date, timeZone: TimeZone = .current) -> String? {
+/// "2d", "3w", then the date in `now`'s zone and locale, with the year only
+/// when it isn't this year. Nil when the timestamp doesn't parse.
+public func age(_ timestamp: String, now: Now) -> String? {
   guard let then = date(timestamp) else { return nil }
-  let secs = max(0, Int(now.timeIntervalSince(then)))
+  let secs = max(0, Int(now.date.timeIntervalSince(then)))
   switch secs {
   case ..<60: return "now"
   case ..<3600: return "\(secs / 60)m"
@@ -239,11 +402,11 @@ public func age(_ timestamp: String, now: Date, timeZone: TimeZone = .current) -
   case ..<(5 * 7 * 86400): return "\(secs / (7 * 86400))w"
   default:
     var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = timeZone
-    let date = calendar.dateComponents([.year, .month, .day], from: then)
-    let year = calendar.component(.year, from: now)
-    let day = "\(months[date.month! - 1]) \(date.day!)"
-    return date.year == year ? day : "\(day), \(date.year!)"
+    calendar.timeZone = now.timeZone
+    let day = Date.FormatStyle(locale: now.locale, calendar: calendar, timeZone: now.timeZone)
+      .month(.abbreviated).day()
+    let sameYear = calendar.component(.year, from: then) == calendar.component(.year, from: now.date)
+    return then.formatted(sameYear ? day : day.year())
   }
 }
 
@@ -261,6 +424,26 @@ public enum Dot: Sendable, Equatable {
     case .known(.some(let checks), let stale): self = .filled(checks, dim: stale)
     case .loading: self = .loading
     case .failed: self = .failed
+    }
+  }
+
+  var spoken: String? {
+    switch self {
+    case .none: nil
+    case .filled(let checks, let dim):
+      checks.spoken + (dim ? " (recheck failed)" : "")
+    case .loading: "loading checks"
+    case .failed: "couldn't load checks"
+    }
+  }
+}
+
+extension Checks {
+  var spoken: String {
+    switch self {
+    case .passing: "checks passing"
+    case .failing: "checks failing"
+    case .pending: "checks pending"
     }
   }
 }
