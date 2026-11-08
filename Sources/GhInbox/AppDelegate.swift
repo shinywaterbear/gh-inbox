@@ -8,9 +8,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     setDockIconOutsideBundle()
     let controller = InboxController()
     NSApp.mainMenu = menu(refresh: controller)
-    controller.showWindow(nil)
     self.controller = controller
-    NSApp.activate()
+    if background {
+      controller.window?.orderBack(nil)
+    } else {
+      controller.showWindow(nil)
+      NSApp.activate()
+    }
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

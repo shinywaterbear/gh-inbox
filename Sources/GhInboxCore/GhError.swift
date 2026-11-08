@@ -42,8 +42,8 @@ public enum GhError: Error, Equatable, Sendable, CustomStringConvertible {
     case .spawn(let m): "could not run gh: \(m)"
     case .gh(let m): "gh failed: \(m)"
     case .parse(let m): "unexpected gh output: \(m)"
-    case .withheld(let n): "GitHub withheld \(n) item(s), usually because of SSO"
-    case .unreadable(let n): "\(n) item(s) could not be read"
+    case .withheld(let n): "GitHub withheld \(counted(n, "item")), usually because of SSO"
+    case .unreadable(let n): "\(counted(n, "item")) could not be read"
     case .otherCommit: "GitHub's checks describe a different commit than the list"
     }
   }

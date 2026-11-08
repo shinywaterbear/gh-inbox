@@ -4,38 +4,48 @@ import GhInboxCore
 /// How often the scheduler checks whether a refresh is due, and ages re-render.
 private let tick: TimeInterval = 10
 
+private let controlsItem = NSToolbarItem.Identifier("controls")
+private let refreshItem = NSToolbarItem.Identifier("refresh")
+
 private let ownerTabs: [(OwnerFilter, String)] = [
   (.all, "All"), (.personal, "Personal"), (.organization, "Org"),
 ]
 
-final class InboxController: NSWindowController, NSWindowDelegate {
+final class InboxController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
   private var inbox = Inbox()
   private var shown = Rows()
+  private var shownBanners: [Notice] = []
   private var focused = false
   private var lastAttempt: Instant?
   private var timer: Timer?
 
-  private let titleLabel = label(size: 17, weight: .semibold)
-  private let summaryLabel = label(size: 12, color: .secondaryLabelColor)
   private let tabs = NSSegmentedControl(
     labels: ownerTabs.map(\.1), trackingMode: .selectOne, target: nil, action: nil)
   private let directOnly = NSButton(checkboxWithTitle: "Direct only", target: nil, action: nil)
-  private let refreshButton = NSButton(title: "Refreshing…", target: nil, action: nil)
+  private let spinner = NSProgressIndicator()
   private let bannerStack = NSStackView()
   private let list = InboxList()
-  private let unavailable = UnavailableView()
+  private lazy var unavailable = UnavailableView { [weak self] in self?.refresh(nil) }
 
   init() {
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680),
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     window.title = "gh-inbox"
+    window.toolbarStyle = .unified
     // Below this the fixed metadata columns squeeze titles to nothing.
     window.contentMinSize = NSSize(width: 760, height: 320)
     super.init(window: window)
     window.delegate = self
     layout(in: window)
-    window.center()
+    if background {
+      if let backgroundSize { window.setContentSize(backgroundSize) }
+      window.center()
+    } else {
+      // Centered only the first time; after that the saved frame is restored.
+      if !window.setFrameUsingName("inbox") { window.center() }
+      window.setFrameAutosaveName("inbox")
+    }
     list.onLoadMore = { [weak self] section in self?.loadMore(section) }
     refresh(nil)
     timer = Timer.scheduledTimer(withTimeInterval: tick, repeats: true) { [weak self] _ in
@@ -43,6 +53,7 @@ final class InboxController: NSWindowController, NSWindowDelegate {
         self?.refreshIfDue(.tick)
         // Ages like "updated 3m ago" move without new data.
         self?.render(rowsChangedOnly: true)
+        self?.list.refreshAges()
       }
     }
   }
@@ -51,35 +62,25 @@ final class InboxController: NSWindowController, NSWindowDelegate {
   required init?(coder: NSCoder) { fatalError() }
 
   private func layout(in window: NSWindow) {
-    summaryLabel.lineBreakMode = .byTruncatingTail
-    summaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    let titles = NSStackView(views: [titleLabel, summaryLabel])
-    titles.alignment = .firstBaseline
-    titles.spacing = 12
-
     tabs.target = self
     tabs.action = #selector(chooseTab(_:))
-    tabs.controlSize = .small
     directOnly.target = self
     directOnly.action = #selector(toggleDirectOnly(_:))
-    refreshButton.target = self
-    refreshButton.action = #selector(refresh(_:))
-    // As wide as "Refreshing…", so the controls beside it never shift.
-    refreshButton.widthAnchor.constraint(equalToConstant: refreshButton.fittingSize.width).isActive = true
-    let controls = NSStackView(views: [tabs, directOnly, refreshButton])
-    controls.spacing = 8
-    // Hidden controls keep their slot, so revealing one never moves another.
-    controls.detachesHiddenViews = false
-    controls.setContentHuggingPriority(.required, for: .horizontal)
+    spinner.style = .spinning
+    spinner.controlSize = .small
+    spinner.isDisplayedWhenStopped = false
 
-    let header = NSStackView(views: [titles, NSView(), controls])
-    header.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+    let toolbar = NSToolbar(identifier: "inbox")
+    toolbar.delegate = self
+    toolbar.displayMode = .iconOnly
+    toolbar.allowsUserCustomization = false
+    window.toolbar = toolbar
 
     bannerStack.orientation = .vertical
     bannerStack.alignment = .leading
     bannerStack.spacing = 0
 
-    let root = NSStackView(views: [header, separator(), bannerStack, list.scrollView, unavailable])
+    let root = NSStackView(views: [bannerStack, list.scrollView])
     root.orientation = .vertical
     root.alignment = .leading
     root.spacing = 0
@@ -87,8 +88,22 @@ final class InboxController: NSWindowController, NSWindowDelegate {
       view.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
     }
     list.scrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
-    unavailable.setContentHuggingPriority(.defaultLow, for: .vertical)
     window.contentView = root
+    // Over the list, not in it: a scroll view keeps only its own subviews.
+    // The error panel sits over the emptied list, so it shares its background.
+    unavailable.translatesAutoresizingMaskIntoConstraints = false
+    root.addSubview(unavailable)
+    root.addSubview(list.allClear)
+    NSLayoutConstraint.activate([
+      unavailable.leadingAnchor.constraint(equalTo: list.scrollView.leadingAnchor),
+      unavailable.trailingAnchor.constraint(equalTo: list.scrollView.trailingAnchor),
+      unavailable.topAnchor.constraint(equalTo: list.scrollView.topAnchor),
+      unavailable.bottomAnchor.constraint(equalTo: list.scrollView.bottomAnchor),
+      list.allClear.centerXAnchor.constraint(equalTo: list.scrollView.centerXAnchor),
+    ])
+    let allClearTop = list.allClear.topAnchor.constraint(equalTo: list.scrollView.topAnchor)
+    allClearTop.isActive = true
+    list.allClearTop = allClearTop
   }
 
   // MARK: Refreshing
@@ -136,6 +151,40 @@ final class InboxController: NSWindowController, NSWindowDelegate {
     if inbox.setReviewDirectOnly(sender.state == .on) { pump() } else { render() }
   }
 
+  // MARK: Toolbar
+
+  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+    [.flexibleSpace, controlsItem, refreshItem]
+  }
+
+  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+    toolbarDefaultItemIdentifiers(toolbar)
+  }
+
+  func toolbar(
+    _ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+    willBeInsertedIntoToolbar flag: Bool
+  ) -> NSToolbarItem? {
+    let item = NSToolbarItem(itemIdentifier: identifier)
+    switch identifier {
+    case controlsItem:
+      let controls = NSStackView(views: [tabs, directOnly, spinner])
+      controls.spacing = 12
+      // Hidden controls keep their slot, so revealing one never moves another.
+      controls.detachesHiddenViews = false
+      item.view = controls
+    case refreshItem:
+      item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")
+      item.label = "Refresh"
+      item.toolTip = "Refresh (⌘R)"
+      item.isBordered = true
+      item.target = self
+      item.action = #selector(refresh(_:))
+    default: return nil
+    }
+    return item
+  }
+
   func windowDidBecomeKey(_ notification: Notification) {
     focused = true
     refreshIfDue(.focus)
@@ -154,9 +203,9 @@ final class InboxController: NSWindowController, NSWindowDelegate {
     let previous = shown.rows
     shown = rows(inbox, now: now)
     let head = header(inbox, rows: shown.rows, now: now)
-    titleLabel.stringValue = head.title
-    summaryLabel.stringValue = head.summary
-    refreshButton.title = head.busy ? "Refreshing…" : "Refresh"
+    window?.title = head.title
+    window?.subtitle = head.summary
+    if head.busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
     tabs.isHidden = !inbox.showOwnerTabs
     tabs.selectedSegment = ownerTabs.firstIndex { $0.0 == inbox.ownerFilter } ?? 0
     directOnly.isHidden = !inbox.showDirectOnly
@@ -165,19 +214,31 @@ final class InboxController: NSWindowController, NSWindowDelegate {
     // One shared failure before any data is shown once, as a panel.
     let failure = inbox.anyLoaded ? nil : inbox.commonError
     unavailable.isHidden = failure == nil
-    list.scrollView.isHidden = failure != nil
     bannerStack.isHidden = failure != nil
     if let failure {
-      unavailable.show(failure)
+      unavailable.show(failure, retrying: retrying(inbox))
+      // Once, as the failure starts; ticks after it have nothing to clear.
+      if !list.isEmpty { list.show(Rows(), of: inbox) }
       return
     }
+    // Rebuilt only on change: a rebuild closes the tooltip holding the full text.
+    let current = banners(inbox)
+    if current != shownBanners {
+      shownBanners = current
+      showBanners(current)
+    } else {
+      for case let banner as Banner in bannerStack.arrangedSubviews { banner.refresh() }
+    }
+    if !rowsChangedOnly || shown.rows != previous { list.show(shown, of: inbox) } else { list.update(inbox) }
+  }
+
+  private func showBanners(_ current: [Notice]) {
     for view in bannerStack.arrangedSubviews { view.removeFromSuperview() }
-    for (text, tone) in banners(inbox, now: now) {
-      let banner = Banner(text: text, color: tone.color)
+    for notice in current {
+      let banner = Banner(notice)
       bannerStack.addArrangedSubview(banner)
       banner.widthAnchor.constraint(equalTo: bannerStack.widthAnchor).isActive = true
     }
-    if !rowsChangedOnly || shown.rows != previous { list.show(shown, of: inbox) }
   }
 }
 
@@ -185,7 +246,14 @@ extension Tone {
   var color: NSColor {
     switch self {
     case .error: .systemRed
-    case .warning: .systemYellow
+    case .warning: .systemOrange
+    }
+  }
+
+  var symbol: String {
+    switch self {
+    case .error: "xmark.octagon.fill"
+    case .warning: "exclamationmark.triangle.fill"
     }
   }
 }
@@ -198,61 +266,135 @@ func label(size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = .la
   return field
 }
 
-@MainActor
-func separator() -> NSBox {
-  let box = NSBox()
-  box.boxType = .separator
-  return box
-}
+/// A full-width notice above the list, tinted by its tone.
+final class Banner: NSView {
+  private let notice: Notice
+  private var field: NSTextField?
 
-/// A full-width notice above the list.
-final class Banner: NSStackView {
-  init(text: String, color: NSColor) {
+  init(_ notice: Notice) {
+    self.notice = notice
     super.init(frame: .zero)
-    let field = NSTextField(wrappingLabelWithString: text)
+    wantsLayer = true
+    let icon = symbol(notice.tone.symbol, size: 13, color: notice.tone.color)
+    let text = notice.text(now: .now)
+    let field = WrappingLabel(wrappingLabelWithString: text)
     field.font = .systemFont(ofSize: 12)
-    field.textColor = color
+    field.textColor = .labelColor
     field.isSelectable = true
-    let padded = NSStackView(views: [field])
-    padded.edgeInsets = NSEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
-    orientation = .vertical
-    alignment = .leading
-    spacing = 0
-    addArrangedSubview(padded)
-    addArrangedSubview(separator())
-    for view in arrangedSubviews { view.widthAnchor.constraint(equalTo: widthAnchor).isActive = true }
+    // Two lines at most; the rest is a hover away.
+    field.maximumNumberOfLines = 2
+    field.lineBreakMode = .byTruncatingTail
+    field.cell?.truncatesLastVisibleLine = true
+    self.field = field
+    let notice = notice
+    field.liveToolTip = LiveToolTip { notice.text(now: .now) }
+    field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    let row = NSStackView(views: [icon, field])
+    row.alignment = .top
+    row.spacing = 8
+    row.edgeInsets = NSEdgeInsets(top: 10, left: 20, bottom: 10, right: 20)
+    row.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(row)
+    NSLayoutConstraint.activate([
+      row.leadingAnchor.constraint(equalTo: leadingAnchor),
+      row.trailingAnchor.constraint(equalTo: trailingAnchor),
+      row.topAnchor.constraint(equalTo: topAnchor),
+      row.bottomAnchor.constraint(equalTo: bottomAnchor),
+    ])
   }
 
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
+
+  /// Moves the age in place; a rebuild would close an open tooltip.
+  func refresh() {
+    if let field { field.show(notice) }
+  }
+
+  override var wantsUpdateLayer: Bool { true }
+
+  override func updateLayer() {
+    layer?.backgroundColor = notice.tone.color.withAlphaComponent(0.12).cgColor
+  }
 }
 
-/// The one error and its hint, when nothing could load.
-final class UnavailableView: NSStackView {
-  private let error = label(size: 17, color: .systemRed)
-  private let hint = label(size: 12, color: .secondaryLabelColor)
+/// A wrapping label that wraps at its own current width. Set from its own
+/// frame change, not its container's layout pass, which runs before the
+/// label is placed and would wrap at its previous width.
+final class WrappingLabel: NSTextField {
+  /// Held here: AppKit doesn't retain a tooltip's owner.
+  var liveToolTip: LiveToolTip?
 
-  init() {
+  override func setFrameSize(_ size: NSSize) {
+    super.setFrameSize(size)
+    liveToolTip?.attach(to: self)
+    if preferredMaxLayoutWidth != size.width {
+      preferredMaxLayoutWidth = size.width
+      invalidateIntrinsicContentSize()
+    }
+  }
+}
+
+extension NSTextField {
+  /// Shows a notice's text as of now, assigning only on change.
+  func show(_ notice: Notice) {
+    let text = notice.text(now: .now)
+    if stringValue != text { stringValue = text }
+  }
+}
+
+/// The one error and its hint, centered, when nothing could load.
+final class UnavailableView: NSView {
+  private let error = label(size: 15, weight: .semibold)
+  private let hint = label(size: 13, color: .secondaryLabelColor)
+  private let retry: () -> Void
+  private let button = NSButton(title: "Try Again", target: nil, action: nil)
+  private let stack = NSStackView()
+
+  init(retry: @escaping () -> Void) {
+    self.retry = retry
     super.init(frame: .zero)
+    let icon = symbol("exclamationmark.icloud", size: 40, color: .tertiaryLabelColor)
+    icon.symbolConfiguration = .init(pointSize: 40, weight: .light)
     for field in [error, hint] {
       field.isSelectable = true
+      field.alignment = .center
       field.lineBreakMode = .byWordWrapping
       field.maximumNumberOfLines = 0
-      field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+      field.preferredMaxLayoutWidth = 460
     }
-    orientation = .vertical
-    alignment = .leading
-    spacing = 8
-    edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
-    setViews([error, hint], in: .top)
+    button.target = self
+    button.action = #selector(tryAgain)
+    stack.setViews([icon, error, hint, button], in: .center)
+    stack.setCustomSpacing(18, after: hint)
+    stack.orientation = .vertical
+    stack.alignment = .centerX
+    stack.spacing = 10
+    stack.setCustomSpacing(16, after: icon)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(stack)
+    NSLayoutConstraint.activate([
+      stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+      stack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -40),
+      stack.widthAnchor.constraint(lessThanOrEqualToConstant: 480),
+      stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
+    ])
   }
 
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
 
-  func show(_ failure: GhError) {
+  @objc private func tryAgain() { retry() }
+
+  /// `retrying` while the sections are fetched again: the old error stays
+  /// up until the new answer, so the button says the retry is underway.
+  func show(_ failure: GhError, retrying: Bool) {
+    button.isEnabled = !retrying
+    button.title = retrying ? "Trying Again…" : "Try Again"
     error.stringValue = failure.description
     hint.stringValue = failure.hint ?? ""
     hint.isHidden = failure.hint == nil
+    // A hidden hint leaves the stack, and its spacing with it.
+    stack.setCustomSpacing(failure.hint == nil ? 18 : 10, after: error)
   }
 }
