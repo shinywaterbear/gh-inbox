@@ -4,6 +4,7 @@ import PackageDescription
 let package = Package(
   name: "gh-inbox",
   platforms: [.macOS(.v14)],
+  products: [.library(name: "GhInboxCore", targets: ["GhInboxCore"])],
   targets: [
     .target(name: "GhInboxCore"),
     .testTarget(name: "GhInboxCoreTests", dependencies: ["GhInboxCore"]),

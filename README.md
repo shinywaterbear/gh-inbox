@@ -85,8 +85,10 @@ it and `Sources/GhInbox` the app that opens it. See [CONTRIBUTING.md](CONTRIBUTI
 
 ## Authentication
 
-gh-inbox uses GitHub CLI's active credentials. Standard `gh auth login` covers
-its needs. For classic PATs and OAuth tokens, private repositories need `repo`
+gh-inbox uses GitHub CLI's active credentials: each refresh asks
+`gh auth token` for the token, then talks to GitHub's GraphQL API directly.
+`GH_HOST` picks the host, as it does for `gh`. Standard `gh auth login`
+covers its needs. For classic PATs and OAuth tokens, private repositories need `repo`
 and organization/team access needs `read:org`. Check with `gh auth status`; for
 stored CLI credentials, add missing scopes with
 `gh auth refresh -s repo,read:org`. Organization SSO may require separate token
@@ -97,3 +99,7 @@ separately. Fine-grained tokens use repository access and permissions instead
 of these scopes. Limited tokens may omit repositories from search results
 without an error. See GitHub's [scope reference](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps)
 and [CLI authentication guide](https://cli.github.com/manual/gh_auth_login).
+
+Unlike `gh`, gh-inbox's requests use the macOS network settings: they go
+through the system proxy, not `HTTPS_PROXY` or `NO_PROXY`, and trust the
+certificates in your keychain, not `SSL_CERT_FILE`.

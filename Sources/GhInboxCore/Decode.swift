@@ -38,21 +38,21 @@ struct Answered {
   var errors: [GraphQLError]
 }
 
-/// A response's data and errors, or why there is no usable response. gh exits
-/// non-zero on any GraphQL error but still prints the partial data, so stdout
-/// is read either way.
-func decodeResponse(_ output: Output) -> Result<Answered, GhError> {
-  let failed = { GhError.fromFailure(status: output.status, stderr: output.stderr) }
+/// A response's data and errors, or why there is no usable response. A
+/// failing status may still carry GraphQL data, so the body is read either way.
+func decodeResponse(_ reply: Reply) -> Result<Answered, GhError> {
   let response: Response
   do {
-    response = try JSONDecoder().decode(Response.self, from: Data(output.stdout))
+    response = try JSONDecoder().decode(Response.self, from: reply.body)
   } catch {
-    guard output.success else { return .failure(failed()) }
+    guard reply.success else { return .failure(reply.failure) }
     let reason = (error as? DecodingError).map(describe) ?? String(describing: error)
     return .failure(.parse(reason))
   }
   let errors = response.errors ?? []
-  let firstError = { errors.first?.error ?? failed() }
+  let firstError = {
+    errors.first?.error ?? (reply.success ? .parse("no data in the response") : reply.failure)
+  }
   guard var data = response.data else { return .failure(firstError()) }
   guard let viewer = try? data.removeValue(forKey: "viewer")?.decode(Viewer.self) else {
     return .failure(firstError())
@@ -64,9 +64,9 @@ func decodeResponse(_ output: Output) -> Result<Answered, GhError> {
 /// Each item is decoded separately so one bad value costs only itself.
 /// Errors elsewhere in the response belong to this section too: it is the
 /// only thing the request asked for besides the viewer.
-func parseSection(alias: String, routing: Routing, output: Output) -> SectionFetch {
+func parseSection(alias: String, routing: Routing, reply: Reply) -> SectionFetch {
   let answered: Answered
-  switch decodeResponse(output) {
+  switch decodeResponse(reply) {
   case .success(let a): answered = a
   case .failure(let error): return SectionFetch(identity: nil, page: .failure(error), warnings: [])
   }
@@ -89,33 +89,15 @@ func parseSection(alias: String, routing: Routing, output: Output) -> SectionFet
   return SectionFetch(identity: answered.identity, page: page, warnings: warnings)
 }
 
-/// `gh api --include` prints the status line and headers before the body.
-func parseMembership(_ output: Output) -> MembershipFetch? {
-  guard let text = String(bytes: output.stdout, encoding: .utf8) else { return nil }
-  func split(_ text: String, at separator: String) -> (Substring, Substring)? {
-    text.range(of: separator).map { (text[..<$0.lowerBound], text[$0.upperBound...]) }
+/// An empty list is conclusive only from a token whose `X-OAuth-Scopes`
+/// let it see private memberships.
+func parseMembership(_ reply: Reply) -> MembershipFetch {
+  guard case .success(var answered) = decodeResponse(reply) else {
+    return MembershipFetch(identity: nil, membership: .unknown)
   }
-  let crlf = split(text, at: "\r\n\r\n").flatMap { $0.0.contains("\n\n") ? nil : $0 }
-  guard let (head, body) = crlf ?? split(text, at: "\n\n") else { return nil }
-  // Split on scalars: a CRLF pair is one Character, so splitting on "\n" alone would miss it.
-  let lines = head.unicodeScalars.split(separator: "\n", omittingEmptySubsequences: false).map {
-    Substring(String($0.last == "\r" ? $0.dropLast() : $0))
-  }
-  let scopes: [Substring]? = lines.lazy.compactMap { line -> [Substring]? in
-    guard let colon = line.firstIndex(of: ":") else { return nil }
-    guard line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "x-oauth-scopes" else {
-      return nil
-    }
-    return line[line.index(after: colon)...].split(separator: ",", omittingEmptySubsequences: false).map {
-      Substring($0.trimmingCharacters(in: .whitespaces))
-    }
-  }.first
-  guard
-    case .success(var answered) = decodeResponse(
-      Output(status: output.status, stdout: Array(body.utf8), stderr: output.stderr))
-  else { return nil }
+  let scopes = reply.scopes?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
   let count = answered.data.removeValue(forKey: "memberships")?["organizations"]["totalCount"].unsigned
-  let seesPrivate = scopes?.contains { orgScopes.contains(String($0)) } ?? false
+  let seesPrivate = scopes?.contains { orgScopes.contains($0) } ?? false
   let membership: Membership =
     switch count {
     case .some(let n) where n > 0: .member
@@ -127,10 +109,10 @@ func parseMembership(_ output: Output) -> MembershipFetch? {
 
 /// Every requested id gets an answer: its state, the error GitHub gave for
 /// it, or why it is missing.
-func parseChecks(ids: [String], output: Output) -> ChecksFetch {
+func parseChecks(ids: [String], reply: Reply) -> ChecksFetch {
   let all = { (error: GhError) in ids.map { (id: $0, result: Result<CheckState, GhError>.failure(error)) } }
   let answered: Answered
-  switch decodeResponse(output) {
+  switch decodeResponse(reply) {
   case .success(let a): answered = a
   case .failure(let error): return ChecksFetch(identity: nil, results: all(error))
   }
@@ -164,7 +146,7 @@ struct Decoded {
 }
 
 func decodeSection(_ value: JSON, viewer: String, routing: Routing) -> Result<Decoded, GhError> {
-  if value.isNull { return .failure(.gh("GitHub returned no results for this section")) }
+  if value.isNull { return .failure(.github("GitHub returned no results for this section")) }
   let connection: Connection
   do { connection = try value.decode(Connection.self) } catch { return .failure(error) }
   var decoded = Decoded(

@@ -8,7 +8,7 @@ public let focusedInterval = Duration.seconds(2 * 60)
 public let blurredInterval = Duration.seconds(10 * 60)
 /// Focusing the window refreshes only when the last attempt is at least this old.
 public let focusMinAge = Duration.seconds(30)
-/// gh calls running at once, sections and checks together.
+/// Requests running at once, sections and checks together.
 public let concurrency = 4
 /// A section's first page, and how much each "load more" adds.
 public let pageStep = 25
@@ -45,7 +45,7 @@ public enum OwnerFilter: Sendable, CaseIterable {
   }
 }
 
-/// One gh call to make. `directOnly` is set only for `reviewSection`.
+/// One request to make. `directOnly` is set only for `reviewSection`.
 public enum Job: Sendable, Equatable {
   case section(index: Int, size: Int, directOnly: Bool)
   case checks(ids: [String])
@@ -74,14 +74,25 @@ public enum Outcome: Sendable {
   }
 }
 
-extension Gh {
-  /// Runs one job; blocks until gh finishes.
-  public func perform(_ job: Job) -> Outcome {
+extension GitHub {
+  /// Runs one job with the round's credential.
+  func perform(_ job: Job, as credential: Credential) async -> Outcome {
     switch job {
     case .section(let index, let size, let directOnly):
-      .section(section(index, size: size, directOnly: directOnly))
-    case .checks(let ids): .checks(checks(ids))
-    case .membership: .membership(membership())
+      .section(await section(index, size: size, directOnly: directOnly, as: credential))
+    case .checks(let ids): .checks(await checks(ids, as: credential))
+    case .membership: .membership(await membership(as: credential))
+    }
+  }
+}
+
+extension Outcome {
+  /// What a job reports when it could not be sent at all.
+  static func failed(_ job: Job, _ error: GhError) -> Outcome {
+    switch job {
+    case .section: .section(SectionFetch(identity: nil, page: .failure(error), warnings: []))
+    case .checks(let ids): .checks(ChecksFetch(identity: nil, results: ids.map { ($0, .failure(error)) }))
+    case .membership: .membership(MembershipFetch(identity: nil, membership: .unknown))
     }
   }
 }

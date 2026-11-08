@@ -89,52 +89,32 @@ func checksQuery(_ ids: [String]) -> String {
     """
 }
 
-/// The gh executable, variables set over the inherited environment, and how
-/// long a call may take, output included.
-public struct Gh: Sendable {
-  var program = "gh"
-  var env: [EnvVar] = []
-  var timeout = Duration.seconds(30)
-
-  /// gh as a terminal would start it, including from a Finder or Dock launch.
-  public static func resolved() -> Gh {
-    Gh(env: LoginEnvironment.environment())
-  }
-
+extension GitHub {
   /// The newest `size` (at most 100) matches for `sections[section]`.
-  public func section(_ section: Int, size: Int, directOnly: Bool) -> SectionFetch {
+  func section(_ section: Int, size: Int, directOnly: Bool, as credential: Credential) async -> SectionFetch {
     let alias = sections[section].alias
     let routing = Routing.of(section, directOnly: directOnly)
     let query = sectionQuery(
       alias: alias, search: search(section, directOnly: directOnly), size: size, routing: routing)
-    switch graphql(query) {
-    case .success(let output): return parseSection(alias: alias, routing: routing, output: output)
+    switch await graphql(query, as: credential) {
+    case .success(let reply): return parseSection(alias: alias, routing: routing, reply: reply)
     case .failure(let error): return SectionFetch(identity: nil, page: .failure(error), warnings: [])
     }
   }
 
   /// Check states for up to 100 PR node ids.
-  public func checks(_ ids: [String]) -> ChecksFetch {
-    switch graphql(checksQuery(ids)) {
-    case .success(let output): return parseChecks(ids: ids, output: output)
+  func checks(_ ids: [String], as credential: Credential) async -> ChecksFetch {
+    switch await graphql(checksQuery(ids), as: credential) {
+    case .success(let reply): return parseChecks(ids: ids, reply: reply)
     case .failure(let error): return ChecksFetch(identity: nil, results: ids.map { ($0, .failure(error)) })
     }
   }
 
-  public func membership() -> MembershipFetch {
-    let unknown = MembershipFetch(identity: nil, membership: .unknown)
-    guard
-      case .success(let output) = run(["api", "--include", "graphql", "-f", "query=\(Queries.membership)"])
-    else { return unknown }
-    return parseMembership(output) ?? unknown
-  }
-
-  func graphql(_ query: String) -> Result<Output, GhError> {
-    run(["api", "graphql", "-f", "query=\(query)"])
-  }
-
-  func run(_ args: [String]) -> Result<Output, GhError> {
-    Result { () throws(GhError) in try capture(program, args, overlay: env, timeout: timeout) }
+  func membership(as credential: Credential) async -> MembershipFetch {
+    guard case .success(let reply) = await graphql(Queries.membership, as: credential) else {
+      return MembershipFetch(identity: nil, membership: .unknown)
+    }
+    return parseMembership(reply)
   }
 }
 

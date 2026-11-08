@@ -1,9 +1,6 @@
 /// gh's documented exit status when it has no credentials.
 let exitAuthRequired: Int32 = 4
 
-/// Go net error text gh passes through when no HTTP response arrived.
-let networkMarkers = ["dial tcp", "no such host", "connection refused", "i/o timeout", "tls handshake"]
-
 /// GitHub's wording when a request outran its processing deadline, which it
 /// may also answer with a bare 502 or 504.
 let serverMarkers = [
@@ -22,11 +19,16 @@ public enum GhError: Error, Equatable, Sendable, CustomStringConvertible {
   case network(String)
   case timeout(Duration)
   case spawn(String)
+  /// gh could not supply a token.
   case gh(String)
+  /// A GitHub error none of the cases above describe.
+  case github(String)
   case parse(String)
   case withheld(Int)
   case unreadable(Int)
   case otherCommit
+  /// The request was abandoned, as after an account change.
+  case cancelled
 
   public var description: String {
     switch self {
@@ -38,13 +40,15 @@ public enum GhError: Error, Equatable, Sendable, CustomStringConvertible {
     case .server(let m): "GitHub had a server error: \(m)"
     case .rateLimited(let m): "GitHub rate limit reached: \(m)"
     case .network(let m): "could not reach GitHub: \(m)"
-    case .timeout(let d): "gh did not finish within \(d.components.seconds)s"
+    case .timeout(let d): "GitHub did not answer within \(d.components.seconds)s"
     case .spawn(let m): "could not run gh: \(m)"
     case .gh(let m): "gh failed: \(m)"
-    case .parse(let m): "unexpected gh output: \(m)"
+    case .github(let m): "GitHub reported an error: \(m)"
+    case .parse(let m): "unexpected response from GitHub: \(m)"
     case .withheld(let n): "GitHub withheld \(counted(n, "item")), usually because of SSO"
     case .unreadable(let n): "\(counted(n, "item")) could not be read"
     case .otherCommit: "GitHub's checks describe a different commit than the list"
+    case .cancelled: "the request was cancelled"
     }
   }
 
@@ -64,7 +68,7 @@ public enum GhError: Error, Equatable, Sendable, CustomStringConvertible {
     case .rateLimited: "Wait a minute, then refresh."
     case .network, .timeout: "Check the network or proxy, then refresh."
     case .otherCommit: "The PR probably changed between requests; refresh."
-    case .spawn, .gh, .parse, .unreadable: nil
+    case .spawn, .gh, .github, .parse, .unreadable, .cancelled: nil
     }
   }
 
@@ -76,18 +80,13 @@ public enum GhError: Error, Equatable, Sendable, CustomStringConvertible {
     return hint.map { "\(text). \($0)" } ?? "\(text)."
   }
 
-  static func fromFailure(status: Int32?, stderr: [UInt8]) -> GhError {
-    if status == exitAuthRequired { return .notLoggedIn }
-    return classify(kind: nil, message: String(decoding: stderr, as: UTF8.self))
-  }
-
   /// `kind` is a GraphQL error's `type`, when the error came in a response.
   static func classify(kind: String?, message: String) -> GhError {
     let message = message.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     let lower = String(
       String.UnicodeScalarView(
         message.unicodeScalars.map { ("A"..."Z").contains($0) ? Unicode.Scalar($0.value + 32)! : $0 }))
-    if kind == "RATE_LIMITED" || lower.contains("rate limit") {
+    if kind == "RATE_LIMITED" || lower.contains("rate limit") || lower.contains("http 429") {
       return .rateLimited(message)
     } else if lower.contains("http 401") || lower.contains("401 unauthorized") {
       return .badCredentials(message)
@@ -97,11 +96,9 @@ public enum GhError: Error, Equatable, Sendable, CustomStringConvertible {
       || lower.contains("saml")
     {
       return .forbidden(message)
-    } else if networkMarkers.contains(where: lower.contains) {
-      return .network(message)
     } else if serverMarkers.contains(where: lower.contains) {
       return .server(message)
     }
-    return .gh(message)
+    return .github(message)
   }
 }

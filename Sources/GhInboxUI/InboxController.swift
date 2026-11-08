@@ -15,7 +15,8 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   /// How many times the window has redrawn from new state, so a host can
   /// tell when results stop arriving.
   public private(set) var renders = 0
-  private var inbox = Inbox()
+  private let model: InboxModel
+  private var inbox: Inbox { model.inbox }
   private let now: @MainActor () -> Date
   private let timeZone: TimeZone
   private let locale: Locale
@@ -34,12 +35,14 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
 
   /// `now` is the wall clock ages are read from, and `timeZone` and
   /// `locale` how dates read; `restoresFrame` false leaves the saved window
-  /// frame alone, for windows that are never shown.
+  /// frame alone, for windows that are never shown; `github` is where
+  /// requests go.
   public init(
     now: @escaping @MainActor () -> Date = Date.init, timeZone: TimeZone = .current,
     locale: Locale = .current,
-    restoresFrame: Bool = true
+    restoresFrame: Bool = true, github: GitHub = .live()
   ) {
+    model = InboxModel(github: github)
     self.now = now
     self.timeZone = timeZone
     self.locale = locale
@@ -50,6 +53,7 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     window.toolbarStyle = .unified
     window.contentMinSize = Metrics.windowMinSize
     super.init(window: window)
+    model.changed = { [weak self] in self?.render() }
     window.delegate = self
     layout(in: window)
     if restoresFrame {
@@ -124,40 +128,21 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
 
   /// Keeps the current rows on screen until the new ones arrive.
   @objc public func refresh(_ sender: Any?) {
-    if inbox.refresh() > 0 { lastAttempt = .now }
-    pump()
+    if model.refresh() > 0 { lastAttempt = .now }
   }
 
   private func loadMore(_ section: Int) {
-    if inbox.loadMore(section) { pump() }
-  }
-
-  /// Starts queued jobs while slots are free; each finished job applies its
-  /// result, renders it at once and pumps again.
-  private func pump() {
-    while let ticket = inbox.nextJob() {
-      Task {
-        let outcome = await withCheckedContinuation { continuation in
-          DispatchQueue.global(qos: .userInitiated).async {
-            continuation.resume(returning: Gh.resolved().perform(ticket.job))
-          }
-        }
-        if inbox.finish(ticket, outcome, now: .now) { inbox.refresh() }
-        pump()
-      }
-    }
-    render()
+    model.loadMore(section)
   }
 
   // MARK: Controls
 
   @objc private func chooseTab(_ sender: NSSegmentedControl) {
-    inbox.ownerFilter = ownerTabs[sender.selectedSegment].0
-    render()
+    model.setOwnerFilter(ownerTabs[sender.selectedSegment].0)
   }
 
   @objc private func toggleDirectOnly(_ sender: NSButton) {
-    if inbox.setReviewDirectOnly(sender.state == .on) { pump() } else { render() }
+    model.setReviewDirectOnly(sender.state == .on)
   }
 
   // MARK: Toolbar
