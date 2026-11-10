@@ -118,6 +118,25 @@ struct DisplayTests {
     #expect(nextSelectable(shown, from: items[0], step: -1) == nil)
   }
 
+  @Test func copyTakesAnItemsLinkAndNothingFromRowsThatDoNothing() {
+    let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([]), ok([])])
+    let copied = rows(inbox, now: at()).map(\.copyText)
+    #expect(copied.compactMap { $0 } == ["a"])
+  }
+
+  @Test func rightClickOffersAnItemsLinkAndReferenceAndNothingOnRowsThatDoNothing() {
+    let inbox = loaded([truncated([pr("https://x/1", "h")], 60), ok([]), ok([]), ok([])])
+    let menus = rows(inbox, now: at()).map(\.menu).filter { !$0.isEmpty }
+    #expect(
+      menus == [
+        [
+          MenuEntry(title: "Open in Browser", action: .open("https://x/1")),
+          MenuEntry(title: "Copy Link", action: .copy("https://x/1")),
+          MenuEntry(title: "Copy o/r#1", action: .copy("o/r#1")),
+        ]
+      ])
+  }
+
   @Test func aCutOffNoteNamesTheShownCountOnlyWhenItDiffers() {
     var inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([]), ok([])])
     // The fixture's repository has no owner type, so the Personal tab drops it.

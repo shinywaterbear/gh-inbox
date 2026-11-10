@@ -11,7 +11,9 @@ private let ownerTabs: [(OwnerFilter, String)] = [
   (.all, "All"), (.personal, "Personal"), (.organization, "Org"),
 ]
 
-public final class InboxController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
+public final class InboxController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
+  NSMenuItemValidation
+{
   /// How many times the window has redrawn from new state, so a host can
   /// tell when results stop arriving.
   public private(set) var renders = 0
@@ -20,7 +22,7 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   private let now: @MainActor () -> Date
   private let timeZone: TimeZone
   private let locale: Locale
-  private var focused = false
+  private var presence = Presence.background
   private var lastAttempt: Instant?
   private var timer: Timer?
 
@@ -52,6 +54,10 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     window.title = "gh-inbox"
     window.toolbarStyle = .unified
     window.contentMinSize = Metrics.windowMinSize
+    // Closing only orders the window out, so the Dock icon or ⌘0 brings it back.
+    window.isReleasedWhenClosed = false
+    // Window > Inbox stands in for it, and stays while the window is closed.
+    window.isExcludedFromWindowsMenu = true
     super.init(window: window)
     model.changed = { [weak self] in self?.render() }
     window.delegate = self
@@ -65,9 +71,10 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     refresh(nil)
     timer = Timer.scheduledTimer(withTimeInterval: tick, repeats: true) { [weak self] _ in
       MainActor.assumeIsolated {
-        self?.refreshIfDue(.tick)
+        guard let self, self.presence != .closed else { return }
+        self.refreshIfDue(.tick)
         // Ages move without new data; only the rows they changed update.
-        self?.render()
+        self.render()
       }
     }
   }
@@ -123,7 +130,7 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
 
   private func refreshIfDue(_ trigger: Trigger) {
     let since = lastAttempt.map { ContinuousClock.now - $0 }
-    if due(trigger, focused: focused, sinceAttempt: since) { refresh(nil) }
+    if due(trigger, presence: presence, sinceAttempt: since) { refresh(nil) }
   }
 
   /// Keeps the current rows on screen until the new ones arrive.
@@ -143,6 +150,44 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
 
   @objc private func toggleDirectOnly(_ sender: NSButton) {
     model.setReviewDirectOnly(sender.state == .on)
+  }
+
+  // MARK: Menu
+
+  /// The owner tabs, in order, as menu titles; a menu item's tag picks one
+  /// for `showOwnerTab(_:)`.
+  public static let ownerTabTitles = ownerTabs.map(\.1)
+
+  @objc public func showOwnerTab(_ sender: NSMenuItem) {
+    guard ownerTabs.indices.contains(sender.tag) else { return }
+    model.setOwnerFilter(ownerTabs[sender.tag].0)
+  }
+
+  @objc public func toggleReviewDirectOnly(_ sender: Any?) {
+    model.setReviewDirectOnly(!inbox.reviewDirectOnly)
+  }
+
+  /// Ages kept still while the window was closed, so they catch up first.
+  public override func showWindow(_ sender: Any?) {
+    if presence == .closed { presence = .background }
+    render()
+    super.showWindow(sender)
+  }
+
+  /// The filters act on what the window shows, so they wait for it, and
+  /// for the toolbar control each mirrors.
+  public func validateMenuItem(_ item: NSMenuItem) -> Bool {
+    switch item.action {
+    case #selector(showOwnerTab(_:)):
+      guard ownerTabs.indices.contains(item.tag) else { return false }
+      item.state = ownerTabs[item.tag].0 == inbox.ownerFilter ? .on : .off
+      return presence != .closed && inbox.showOwnerTabs
+    case #selector(toggleReviewDirectOnly(_:)):
+      item.state = inbox.reviewDirectOnly ? .on : .off
+      return presence != .closed && inbox.showDirectOnly
+    default:
+      return true
+    }
   }
 
   // MARK: Toolbar
@@ -180,12 +225,16 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   }
 
   public func windowDidBecomeKey(_ notification: Notification) {
-    focused = true
+    presence = .focused
     refreshIfDue(.focus)
   }
 
   public func windowDidResignKey(_ notification: Notification) {
-    focused = false
+    if presence == .focused { presence = .background }
+  }
+
+  public func windowWillClose(_ notification: Notification) {
+    presence = .closed
   }
 
   // MARK: Rendering

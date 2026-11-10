@@ -21,13 +21,21 @@ public enum Trigger: Sendable {
   case tick, focus
 }
 
+/// Where the window stands. Minimized or hidden is `background`; a closed
+/// window shows nothing, so nothing is fetched until it opens again.
+public enum Presence: Sendable {
+  case focused, background, closed
+}
+
 /// Whether an automatic refresh is due. `sinceAttempt` counts failures too,
 /// so a failing refresh is retried at the normal cadence, not in a loop.
-public func due(_ trigger: Trigger, focused: Bool, sinceAttempt: Duration?) -> Bool {
+public func due(_ trigger: Trigger, presence: Presence, sinceAttempt: Duration?) -> Bool {
+  if presence == .closed { return false }
   guard let age = sinceAttempt else { return true }
-  switch trigger {
-  case .focus: return focused && age >= focusMinAge
-  case .tick: return age >= (focused ? focusedInterval : blurredInterval)
+  switch (trigger, presence) {
+  case (.focus, .focused): return age >= focusMinAge
+  case (.focus, _): return false
+  case (.tick, _): return age >= (presence == .focused ? focusedInterval : blurredInterval)
   }
 }
 

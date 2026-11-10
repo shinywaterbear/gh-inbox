@@ -288,16 +288,18 @@ struct SectionStateTests {
     #expect(v1 == 0, "busy sections are not queued twice")
   }
 
-  @Test func scheduleFollowsFocus() {
+  @Test func scheduleFollowsPresence() {
     func s(_ n: Int64) -> Duration { .seconds(n) }
-    #expect(due(.tick, focused: true, sinceAttempt: nil), "first load")
-    #expect(!due(.tick, focused: true, sinceAttempt: s(119)))
-    #expect(due(.tick, focused: true, sinceAttempt: s(120)))
-    #expect(!due(.tick, focused: false, sinceAttempt: s(599)))
-    #expect(due(.tick, focused: false, sinceAttempt: s(600)))
-    #expect(!due(.focus, focused: true, sinceAttempt: s(29)))
-    #expect(due(.focus, focused: true, sinceAttempt: s(30)))
-    #expect(!due(.focus, focused: false, sinceAttempt: s(3600)))
+    #expect(due(.tick, presence: .focused, sinceAttempt: nil), "first load")
+    #expect(!due(.tick, presence: .focused, sinceAttempt: s(119)))
+    #expect(due(.tick, presence: .focused, sinceAttempt: s(120)))
+    #expect(!due(.tick, presence: .background, sinceAttempt: s(599)))
+    #expect(due(.tick, presence: .background, sinceAttempt: s(600)))
+    #expect(!due(.focus, presence: .focused, sinceAttempt: s(29)))
+    #expect(due(.focus, presence: .focused, sinceAttempt: s(30)))
+    #expect(!due(.focus, presence: .background, sinceAttempt: s(3600)))
+    #expect(!due(.tick, presence: .closed, sinceAttempt: nil), "closed fetches nothing")
+    #expect(!due(.tick, presence: .closed, sinceAttempt: s(86400)))
   }
 
   @Test func agesReadNaturally() {

@@ -59,6 +59,8 @@ public struct ItemRow: Sendable, Equatable {
   public var owner: String?
   public var repo: String
   public var number: Int
+  /// `owner/repo#123`, as GitHub links it in comments and commits.
+  public var reference: String
   public var title: String
   public var kind: Kind
   public var dot: Dot
@@ -103,6 +105,12 @@ public enum RowAction: Sendable, Equatable {
   case copy(String)
 }
 
+/// One entry in a row's right-click menu.
+public struct MenuEntry: Sendable, Equatable {
+  public var title: String
+  public var action: RowAction
+}
+
 public struct RowModel: Sendable, Equatable, Identifiable {
   public var id: RowID
   public var content: RowContent
@@ -116,6 +124,29 @@ public struct RowModel: Sendable, Equatable, Identifiable {
     case .heading, .cutOff: nil
     case .notice(let notice): .copy(notice.text)
     case .item(let item): .open(item.url)
+    }
+  }
+
+  /// The right-click menu: an item can be copied without opening it.
+  public var menu: [MenuEntry] {
+    switch content {
+    case .heading, .cutOff: []
+    case .notice(let notice): [MenuEntry(title: "Copy", action: .copy(notice.text))]
+    case .item(let item):
+      [
+        MenuEntry(title: "Open in Browser", action: .open(item.url)),
+        MenuEntry(title: "Copy Link", action: .copy(item.url)),
+        MenuEntry(title: "Copy \(item.reference)", action: .copy(item.reference)),
+      ]
+    }
+  }
+
+  /// What Edit > Copy puts on the pasteboard for the selected row: an
+  /// item's link, or a notice's full text.
+  public var copyText: String? {
+    switch action {
+    case .open(let text), .copy(let text): text
+    case nil: nil
     }
   }
 
@@ -188,7 +219,8 @@ func itemRow(_ item: Item, check: CheckView?, multiOwner: Bool, viewer: String?,
   ]
   return ItemRow(
     url: item.url, owner: multiOwner ? String(item.owner) : nil, repo: item.repository.name,
-    number: item.number, title: item.title, kind: kind, dot: dot, route: route, author: author,
+    number: item.number, reference: "\(item.repository.nameWithOwner)#\(item.number)",
+    title: item.title, kind: kind, dot: dot, route: route, author: author,
     age: age(item.updatedAt, now: now) ?? "", toolTip: toolTip,
     accessibilityLabel: spoken.compactMap { $0 }.joined(separator: ", "))
 }

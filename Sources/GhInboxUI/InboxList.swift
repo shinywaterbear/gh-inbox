@@ -43,6 +43,21 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     table.next = { [weak self] from, step in
       self.flatMap { nextSelectable($0.rows, from: from, step: step) }
     }
+    table.copyText = { [weak self] row in
+      guard let self, rows.indices.contains(row) else { return nil }
+      return rows[row].copyText
+    }
+    table.contextMenu = { [weak self] row in
+      guard let self, rows.indices.contains(row), !rows[row].menu.isEmpty else { return nil }
+      let menu = NSMenu()
+      for entry in rows[row].menu {
+        let item = NSMenuItem(title: entry.title, action: #selector(choose(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = entry.action
+        menu.addItem(item)
+      }
+      return menu
+    }
     table.activate = { [weak self] row in
       guard let self, rows.indices.contains(row), let action = rows[row].action else { return }
       perform(action)
@@ -137,13 +152,15 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     table.activate(table.clickedRowUnderPins)
   }
 
+  @objc private func choose(_ sender: NSMenuItem) {
+    if let action = sender.representedObject as? RowAction { perform(action) }
+  }
+
   private func perform(_ action: RowAction) {
     switch action {
     case .open(let url):
       if let link = URL(string: url) { NSWorkspace.shared.open(link) }
-    case .copy(let text):
-      NSPasteboard.general.clearContents()
-      NSPasteboard.general.setString(text, forType: .string)
+    case .copy(let text): putOnPasteboard(text)
     }
   }
 }
@@ -220,15 +237,40 @@ final class HoverTable: NSTableView {
   var next: (_ from: Int?, _ step: Int) -> Int? = { _, _ in nil }
   /// Does what clicking the row does, set by the list.
   var activate: (Int) -> Void = { _ in }
+  /// The right-click menu for a row, set by the list.
+  var contextMenu: (Int) -> NSMenu? = { _ in nil }
+  /// What Edit > Copy takes from a row, set by the list.
+  var copyText: (Int) -> String? = { _ in nil }
+
+  @objc func copy(_ sender: Any?) {
+    guard selectedRow >= 0, let text = copyText(selectedRow) else { return }
+    putOnPasteboard(text)
+  }
+
+  override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+    guard item.action == #selector(copy(_:)) else { return super.validateUserInterfaceItem(item) }
+    return selectedRow >= 0 && copyText(selectedRow) != nil
+  }
 
   /// A click takes the keys back from wherever they went.
   /// A click on a pinned heading stops there: the table would select the
   /// row scrolled beneath it, which Return would then open unseen.
   override func mouseDown(with event: NSEvent) {
     window?.makeFirstResponder(self)
+    // The table would treat a control-click as a click and open the row.
+    if event.modifierFlags.contains(.control) {
+      if let menu = menu(for: event) { NSMenu.popUpContextMenu(menu, with: event, for: self) }
+      return
+    }
     let point = convert(event.locationInWindow, from: nil)
     if rowUnderPins(point) != row(at: point) { return }
     super.mouseDown(with: event)
+  }
+
+  /// Like a click, a right-click on a pinned heading is the heading's.
+  override func menu(for event: NSEvent) -> NSMenu? {
+    let row = rowUnderPins(convert(event.locationInWindow, from: nil))
+    return row >= 0 ? contextMenu(row) : nil
   }
 
   /// Up and down skip headings and cut-off rows, which do nothing; Return
@@ -349,4 +391,9 @@ final class HoverRow: NSTableRowView {
 
   /// Drawn in `drawBackground`, as a tint rather than a solid fill.
   override func drawSelection(in dirtyRect: NSRect) {}
+}
+
+private func putOnPasteboard(_ text: String) {
+  NSPasteboard.general.clearContents()
+  NSPasteboard.general.setString(text, forType: .string)
 }

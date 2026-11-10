@@ -36,9 +36,14 @@ For a quick look without installing, `swift run` starts it from the checkout.
 - Sections: awaiting your review, your open PRs, assigned to you, and what's
   left in repos you own. An item shows once, in the first section that has it.
 - Click a row to open it in the browser, or select it with the arrow keys
-  and press Return. `cmd-r` refreshes and `cmd-q` quits.
+  and press Return; `cmd-c` copies its link. Right-click a row to copy its
+  link or `owner/repo#123` without opening it. `cmd-r` refreshes.
   It also refreshes on its own every 2 minutes while focused, every 10 in the
   background.
+- Closing the window keeps gh-inbox in the Dock without fetching anything;
+  click the Dock icon or press `cmd-0` to bring it back, `cmd-q` to quit.
+- The View menu mirrors the toolbar: `cmd-1`/`2`/`3` pick All, Personal or
+  Org, and `shift-cmd-d` toggles "Direct only".
 - "Direct only" hides review requests that reached you through a team. The
   All/Personal/Org tabs appear once both kinds of repository show up.
 
