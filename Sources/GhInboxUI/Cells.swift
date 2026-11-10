@@ -10,6 +10,10 @@ class RowCell: NSTableCellView {
   var repoColumn = Metrics.repoWidth.nameOnly {
     didSet { if repoColumn != oldValue { needsLayout = true } }
   }
+  /// The age column's width, which fits the widest age in the list.
+  var ageColumn = Metrics.ageWidth {
+    didSet { if ageColumn != oldValue { needsLayout = true } }
+  }
 
   override init(frame: NSRect) {
     super.init(frame: frame)
@@ -215,7 +219,7 @@ final class ItemCell: RowCell {
     repo.usesSingleLineMode = true
     repo.lineBreakMode = .byTruncatingMiddle
     repo.cell?.wraps = false
-    age.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+    age.font = Metrics.ageFont
     age.alignment = .right
     for view in [check, kindIcon, repo, title, pill, route, author, age] { addSubview(view) }
   }
@@ -271,8 +275,8 @@ final class ItemCell: RowCell {
     let repoX = Metrics.inset + Metrics.leadWidth + Metrics.columnGap
     place(repo, x: repoX, width: repoColumn)
 
-    let ageX = bounds.width - Metrics.inset - Metrics.ageWidth
-    place(age, x: ageX, width: Metrics.ageWidth)
+    let ageX = bounds.width - Metrics.inset - ageColumn
+    place(age, x: ageX, width: ageColumn)
     let authorX = ageX - Metrics.columnGap - Metrics.authorWidth
     place(author, x: authorX, width: Metrics.authorWidth)
 

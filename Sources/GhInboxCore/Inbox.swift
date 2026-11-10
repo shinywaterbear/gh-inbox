@@ -489,7 +489,7 @@ public struct Inbox: Sendable {
       }
       newPlaced[url] = place
     }
-    for s in reranked { rank(&sections[s].items) }
+    for s in reranked { rank(&sections[s].items, by: GhInboxCore.sections[s].ranking) }
     placed = newPlaced
   }
 

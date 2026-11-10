@@ -247,6 +247,17 @@ struct SectionStateTests {
     #expect(inbox.updated == t1, "other sections did arrive")
   }
 
+  @Test func aNewerCopyReranksMyPrsByMyOrder() {
+    let waiting = pr("waiting", "h")
+    var later = pr("later", "h")
+    var inbox = Inbox()
+    refreshWith(&inbox, [ok([]), ok([waiting, later]), ok([]), ok([later])])
+    // My open PRs fails; Also in my repos brings the newer, approved copy.
+    later.review = .approved
+    refreshWith(&inbox, [ok([]), ghFailed(), ok([]), ok([later])])
+    #expect(urls(inbox.sections[1]) == ["later", "waiting"])
+  }
+
   @Test func recoveryClearsErrorsAndNeverLoadedIsNotEmpty() {
     var inbox = Inbox()
     refreshWith(&inbox, four(ghFailed(), ok([])))

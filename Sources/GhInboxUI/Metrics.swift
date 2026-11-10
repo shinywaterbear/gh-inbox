@@ -20,7 +20,9 @@ enum Metrics {
   /// Between a title, its pill and its review route.
   static let titleGap: CGFloat = 8
   static let authorWidth: CGFloat = 104
+  /// The age column's least width; a date with a year widens it.
   static let ageWidth: CGFloat = 52
+  static var ageFont: NSFont { .monospacedDigitSystemFont(ofSize: 12, weight: .regular) }
   /// The repository column, with and without owners shown. Fixed, so titles
   /// never shift sideways as rows come and go.
   static let repoWidth = (withOwner: CGFloat(200), nameOnly: CGFloat(140))
@@ -43,6 +45,19 @@ enum Metrics {
   static let windowSize = NSSize(width: 1000, height: 680)
   /// Below this the fixed metadata columns squeeze titles to nothing.
   static let windowMinSize = NSSize(width: 760, height: 320)
+
+  /// The age column, wide enough for every age shown in the reader's
+  /// date format, so none is cut off whatever room the titles have.
+  @MainActor static func ageColumn(_ ages: [String]) -> CGFloat {
+    let probe = label(size: 12)
+    probe.font = ageFont
+    let widest =
+      ages.map { age -> CGFloat in
+        probe.stringValue = age
+        return probe.naturalSize.width
+      }.max() ?? 0
+    return max(ageWidth, widest.rounded(.up))
+  }
 
   /// The repository column's width for a list `width` wide.
   static func repoColumn(multiOwner: Bool, width: CGFloat) -> CGFloat {

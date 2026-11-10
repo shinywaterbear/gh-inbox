@@ -418,6 +418,25 @@ struct ItemTests {
     #expect(numbers == [4, 3, 2, 1])
   }
 
+  /// Your own approved PR is the one you can merge now, so it leads; one
+  /// with changes requested is yours to fix; one awaiting review waits on
+  /// someone else.
+  @Test func myApprovedPrsLeadThenChangesRequestedThenWaiting() async throws {
+    let json = response(
+      conn([]),
+      conn([
+        pr(1, "2026-11-05T00:00:00Z", draft: true),
+        pr(2, "2026-11-04T00:00:00Z", decision: "REVIEW_REQUIRED"),
+        pr(3, "2026-11-03T00:00:00Z", decision: "CHANGES_REQUESTED"),
+        pr(4, "2026-11-02T00:00:00Z", decision: "APPROVED"),
+        pr(5, "2026-11-01T00:00:00Z", decision: "APPROVED"),
+        pr(6, "2026-10-31T00:00:00Z", decision: "CHANGES_REQUESTED"),
+      ]))
+    let numbers = try await items(responding(json).section(authored, size: 25, directOnly: false)).map(
+      \.number)
+    #expect(numbers == [4, 5, 3, 6, 2, 1])
+  }
+
   @Test func reviewsDecideOnlyFromCompleteOpinions() async {
     let approved = ["APPROVED"]
     #expect(GhInboxCore.review(decision: nil, latest: approved, complete: true) == .approved)

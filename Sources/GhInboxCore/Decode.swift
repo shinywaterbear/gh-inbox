@@ -80,7 +80,7 @@ func parseSection(alias: String, routing: Routing, reply: Reply) -> SectionFetch
     if decoded.withheld > 0 && warnings.isEmpty { warnings.append(.withheld(decoded.withheld)) }
     if decoded.unreadable > 0 { warnings.append(.unreadable(decoded.unreadable)) }
     var items = decoded.items
-    rank(&items)
+    rank(&items, by: sections.first { $0.alias == alias }?.ranking ?? .attention)
     page = .success(
       Page(items: items, total: decoded.total, truncated: decoded.truncated, returned: decoded.returned))
   case .failure(let problem):

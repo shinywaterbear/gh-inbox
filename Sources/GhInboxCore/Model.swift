@@ -67,10 +67,16 @@ public struct Item: Sendable, Equatable {
     return repository.nameWithOwner[..<slash]
   }
 
-  /// 0 needs attention, 1 approved, 2 draft.
-  var tier: Int {
-    if isDraft { return 2 }
-    return review == .approved ? 1 : 0
+  /// Where the item falls in `ranking`'s order; drafts always come last.
+  func tier(_ ranking: Ranking) -> Int {
+    if isDraft { return 3 }
+    switch (ranking, review) {
+    case (.attention, .approved): return 1
+    case (.attention, _): return 0
+    case (.merge, .approved): return 0
+    case (.merge, .changesRequested): return 1
+    case (.merge, _): return 2
+    }
   }
 }
 
@@ -127,12 +133,22 @@ public struct ChecksFetch: Sendable {
   public var results: [(id: String, result: Result<CheckState, GhError>)]
 }
 
-/// Needs-attention items first, then approved PRs, then drafts; most recent
-/// activity first within each. Stable, so equal items keep their order.
-public func rank(_ items: inout [Item]) {
+/// How a section orders its items; most recent activity first within each
+/// group, drafts last.
+public enum Ranking: Sendable {
+  /// What needs the viewer's review first, then approved PRs.
+  case attention
+  /// The viewer's own PRs: approved ones can be merged now, changes
+  /// requested are theirs to fix, and the rest wait on reviewers.
+  case merge
+}
+
+/// Orders items by `ranking`. Stable, so equal items keep their order.
+public func rank(_ items: inout [Item], by ranking: Ranking) {
   // RFC 3339 UTC timestamps sort lexically.
   items = items.enumerated().sorted { a, b in
-    if a.element.tier != b.element.tier { return a.element.tier < b.element.tier }
+    let (ta, tb) = (a.element.tier(ranking), b.element.tier(ranking))
+    if ta != tb { return ta < tb }
     if a.element.updatedAt != b.element.updatedAt { return a.element.updatedAt > b.element.updatedAt }
     return a.offset < b.offset
   }.map(\.element)

@@ -10,6 +10,7 @@ public struct SectionSpec: Sendable {
   let scope: String
   /// Who the section is about.
   let qualifier: String
+  var ranking = Ranking.attention
 }
 
 /// Display order.
@@ -18,7 +19,8 @@ public let sections: [SectionSpec] = [
     alias: "review", name: "Awaiting my review", scope: "is:open is:pr archived:false",
     qualifier: "review-requested:@me"),
   SectionSpec(
-    alias: "authored", name: "My open PRs", scope: "is:open is:pr archived:false", qualifier: "author:@me"),
+    alias: "authored", name: "My open PRs", scope: "is:open is:pr archived:false", qualifier: "author:@me",
+    ranking: .merge),
   SectionSpec(
     alias: "assigned", name: "Assigned to me", scope: "is:open archived:false", qualifier: "assignee:@me"),
   SectionSpec(

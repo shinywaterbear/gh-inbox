@@ -13,6 +13,7 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
   private(set) var rows: [RowModel] = []
   private var multiOwner = false
   private var repoColumn = Metrics.repoWidth.nameOnly
+  private var ageColumn = Metrics.ageWidth
   var onLoadMore: (Int) -> Void = { _ in }
 
   override init() {
@@ -81,6 +82,14 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     let diff = changes(from: rows, to: new)
     rows = new
     multiOwner = new.contains { if case .item(let item) = $0.content { item.owner != nil } else { false } }
+    let ages = new.compactMap { if case .item(let item) = $0.content { item.age } else { nil } }
+    let age = Metrics.ageColumn(ages)
+    if age != ageColumn {
+      ageColumn = age
+      table.enumerateAvailableRowViews { rowView, _ in
+        (rowView.view(atColumn: 0) as? RowCell)?.ageColumn = age
+      }
+    }
     if !diff.removed.isEmpty || !diff.inserted.isEmpty {
       table.beginUpdates()
       table.removeRows(at: IndexSet(diff.removed), withAnimation: [])
@@ -144,6 +153,7 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
       tableView.makeView(withIdentifier: identifier, owner: nil) as? RowCell ?? RowCell.make(for: model)
     cell.identifier = identifier
     cell.repoColumn = repoColumn
+    cell.ageColumn = ageColumn
     cell.configure(model, onLoadMore: onLoadMore)
     return cell
   }
