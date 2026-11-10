@@ -18,4 +18,5 @@ let package = Package(
   package.products.append(.library(name: "GhInboxUI", targets: ["GhInboxUI"]))
   package.targets.append(.target(name: "GhInboxUI", dependencies: ["GhInboxCore"]))
   package.targets.append(.executableTarget(name: "GhInbox", dependencies: ["GhInboxUI"]))
+  package.targets.append(.testTarget(name: "GhInboxUITests", dependencies: ["GhInboxUI"]))
 #endif

@@ -100,11 +100,15 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError() }
 
-  /// Draws list row `hoveredRow` (headings count) as hovered, selects
-  /// `selectedRow` and scrolls the list down `scroll` points, for rendering
-  /// states no pointer or keyboard is there to make.
-  public func stage(hoveredRow: Int?, selectedRow: Int? = nil, scroll: CGFloat?) {
+  /// Draws list row `hoveredRow` and sidebar row `hoveredQueue` (headings
+  /// count) as hovered, selects `selectedRow` and scrolls the list down
+  /// `scroll` points, for rendering states no pointer or keyboard is there
+  /// to make.
+  public func stage(
+    hoveredRow: Int?, hoveredQueue: Int? = nil, selectedRow: Int? = nil, scroll: CGFloat?
+  ) {
     list.stage(hoveredRow: hoveredRow, selectedRow: selectedRow, scroll: scroll)
+    sidebar.stage(hoveredRow: hoveredQueue)
   }
 
   /// The whole window, title bar included, drawn offscreen.

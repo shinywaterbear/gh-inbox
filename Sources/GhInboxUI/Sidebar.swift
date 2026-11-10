@@ -11,7 +11,7 @@ final class Sidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
   }
 
   let scrollView = NSScrollView()
-  private let table = SidebarTable()
+  let table = SidebarTable()
   private(set) var entries: [Entry] = []
   var keyView: NSView { table }
   /// A queue was chosen, by click or arrow key.
@@ -37,8 +37,16 @@ final class Sidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     table.allowsEmptySelection = false
     table.dataSource = self
     table.delegate = self
+    table.isQueue = { [weak self] row in
+      guard let self, entries.indices.contains(row), case .queue = entries[row] else { return false }
+      return true
+    }
     table.setAccessibilityLabel("Queues")
     scrollView.documentView = table
+    scrollView.contentView.postsBoundsChangedNotifications = true
+    NotificationCenter.default.addObserver(
+      table, selector: #selector(SidebarTable.updateHover), name: NSView.boundsDidChangeNotification,
+      object: scrollView.contentView)
     scrollView.drawsBackground = false
     scrollView.hasVerticalScroller = true
     // With "Show scroll bars: Always", a track only when there is more.
@@ -62,6 +70,7 @@ final class Sidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     if new.map(identity) != entries.map(identity) {
       entries = new
       table.reloadData()
+      table.updateHover()
     } else if new != entries {
       let old = entries
       entries = new
@@ -69,9 +78,15 @@ final class Sidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? QueueCell)?.configure(entries[row])
       }
     }
-    if let row = row(of: selected), table.selectedRow != row {
+    // Mid-click the table holds the user's choice, not yet reported.
+    if !table.tracking, let row = row(of: selected), table.selectedRow != row {
       table.selectRowIndexes([row], byExtendingSelection: false)
     }
+  }
+
+  func stage(hoveredRow: Int?) {
+    table.stagedHover = hoveredRow
+    table.updateHover()
   }
 
   private func identity(_ entry: Entry) -> String {
@@ -81,7 +96,7 @@ final class Sidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
   }
 
-  private func row(of section: Int) -> Int? {
+  func row(of section: Int) -> Int? {
     entries.firstIndex { if case .queue(let q) = $0 { q.section == section } else { false } }
   }
 
@@ -93,6 +108,13 @@ final class Sidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
   func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
     if case .queue = entries[row] { true } else { false }
+  }
+
+  func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+    let view = QueueRow()
+    view.hoverable = table.isQueue(row)
+    view.hovering = row == table.hoveredRow
+    return view
   }
 
   func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -110,8 +132,61 @@ final class Sidebar: NSObject, NSTableViewDataSource, NSTableViewDelegate {
   }
 }
 
+/// Tracks the queue under the pointer, as the list's `HoverTable` does.
 final class SidebarTable: NSTableView {
   var toList: () -> Void = {}
+  var tracking = false
+  var isQueue: (Int) -> Bool = { _ in false }
+  /// Drawn as hovered whatever the pointer does, for rendering offscreen.
+  var stagedHover: Int?
+  private(set) var hoveredRow = -1
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    trackingAreas.filter { $0.owner === self }.forEach(removeTrackingArea)
+    addTrackingArea(
+      NSTrackingArea(
+        rect: .zero,
+        options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+        owner: self))
+  }
+
+  override func mouseEntered(with event: NSEvent) { updateHover() }
+  override func mouseMoved(with event: NSEvent) { updateHover() }
+  override func mouseExited(with event: NSEvent) {
+    setHovered(-1)
+    NSCursor.arrow.set()
+  }
+  override func cursorUpdate(with event: NSEvent) { updateHover() }
+
+  private func setHovered(_ row: Int) {
+    hoveredRow = row
+    enumerateAvailableRowViews { view, index in (view as? QueueRow)?.hovering = index == row }
+  }
+
+  @objc func updateHover() {
+    if let stagedHover {
+      setHovered(stagedHover)
+      return
+    }
+    guard let window, window.isKeyWindow else {
+      setHovered(-1)
+      return
+    }
+    let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    guard visibleRect.contains(point) else {
+      setHovered(-1)
+      return
+    }
+    setHovered(row(at: point))
+    (isQueue(hoveredRow) ? NSCursor.pointingHand : NSCursor.arrow).set()
+  }
+
+  override func mouseDown(with event: NSEvent) {
+    tracking = true
+    defer { tracking = false }
+    super.mouseDown(with: event)
+  }
 
   override func keyDown(with event: NSEvent) {
     if event.specialKey == .rightArrow, event.modifierFlags.intersection([.command, .option, .shift]).isEmpty
@@ -120,6 +195,29 @@ final class SidebarTable: NSTableView {
       return
     }
     super.keyDown(with: event)
+  }
+}
+
+/// Washes a hovered queue as the list washes a hovered row; the selected
+/// queue keeps the source list's own highlight alone.
+final class QueueRow: NSTableRowView {
+  var hoverable = false
+  var hovering = false {
+    didSet { if hovering != oldValue { needsDisplay = true } }
+  }
+
+  override var isSelected: Bool {
+    didSet { if isSelected != oldValue { needsDisplay = true } }
+  }
+
+  override func drawBackground(in dirtyRect: NSRect) {
+    super.drawBackground(in: dirtyRect)
+    guard hovering, hoverable, !isSelected else { return }
+    NSColor.labelColor.withAlphaComponent(0.07).setFill()
+    NSBezierPath(
+      roundedRect: bounds.insetBy(dx: Metrics.hoverInset.width, dy: Metrics.hoverInset.height),
+      xRadius: Metrics.hoverRadius, yRadius: Metrics.hoverRadius
+    ).fill()
   }
 }
 
