@@ -98,8 +98,8 @@ final class FakeGitHub: @unchecked Sendable {
     lock.withLock { _cancelled.append(request) }
   }
 
-  func section(_ index: Int, size: Int = 25, directOnly: Bool = false) async -> SectionFetch {
-    await github().section(index, size: size, directOnly: directOnly, as: credential)
+  func section(_ index: Int, size: Int = 25) async -> SectionFetch {
+    await github().section(index, size: size, as: credential)
   }
 
   func checks(_ ids: [String]) async -> ChecksFetch {

@@ -11,8 +11,11 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
   /// Where keys go when the window opens.
   var keyView: NSView { table }
   private(set) var rows: [RowModel] = []
-  private var multiOwner = false
-  private var repoColumn = Metrics.repoWidth.nameOnly
+  /// The queue the rows are from.
+  private var queue: Int?
+  /// Each queue's selected row and scroll position, kept while another
+  /// queue shows.
+  private var places: [Int: (selected: RowID?, scroll: CGFloat)] = [:]
   private var ageColumn = Metrics.ageWidth
   var onLoadMore: (Int) -> Void = { _ in }
 
@@ -66,22 +69,53 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     table.setAccessibilityLabel("Open pull requests and issues")
     scrollView.documentView = table
     scrollView.hasVerticalScroller = true
+    scrollView.autohidesScrollers = true
     scrollView.backgroundColor = .controlBackgroundColor
     scrollView.contentView.postsBoundsChangedNotifications = true
-    scrollView.postsFrameChangedNotifications = true
-    NotificationCenter.default.addObserver(
-      self, selector: #selector(resized), name: NSView.frameDidChangeNotification, object: scrollView)
     NotificationCenter.default.addObserver(
       table, selector: #selector(HoverTable.updateHover), name: NSView.boundsDidChangeNotification,
       object: scrollView.contentView)
   }
 
-  /// Applies only what changed since the last rows: rows that left or
-  /// arrived are removed or inserted, and kept rows are reconfigured.
-  func show(_ new: [RowModel]) {
+  /// Shows `queue`'s rows. For the same queue only what changed is
+  /// applied: rows that left or arrived are removed or inserted, and kept
+  /// rows are reconfigured. Another queue replaces the rows and returns to
+  /// its own selection and scroll position.
+  func show(_ new: [RowModel], queue: Int) {
+    if queue != self.queue {
+      if let old = self.queue {
+        let selected = rows.indices.contains(table.selectedRow) ? rows[table.selectedRow].id : nil
+        places[old] = (selected, scrollView.contentView.bounds.origin.y)
+      }
+      self.queue = queue
+      rows = new
+      setAgeColumn(new)
+      table.reloadData()
+      let place = places[queue]
+      let selected = place?.selected.flatMap { id in new.firstIndex { $0.id == id } }
+      if let selected {
+        table.selectRowIndexes([selected], byExtendingSelection: false)
+      } else {
+        table.deselectAll(nil)
+      }
+      table.scroll(NSPoint(x: 0, y: place?.scroll ?? 0))
+      table.updateHover()
+      return
+    }
     let diff = changes(from: rows, to: new)
     rows = new
-    multiOwner = new.contains { if case .item(let item) = $0.content { item.owner != nil } else { false } }
+    setAgeColumn(new)
+    if !diff.removed.isEmpty || !diff.inserted.isEmpty {
+      table.beginUpdates()
+      table.removeRows(at: IndexSet(diff.removed), withAnimation: [])
+      table.insertRows(at: IndexSet(diff.inserted), withAnimation: [])
+      table.endUpdates()
+    }
+    for row in diff.updated { reconfigure(row) }
+    table.updateHover()
+  }
+
+  private func setAgeColumn(_ new: [RowModel]) {
     let ages = new.compactMap { if case .item(let item) = $0.content { item.age } else { nil } }
     let age = Metrics.ageColumn(ages)
     if age != ageColumn {
@@ -90,15 +124,6 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         (rowView.view(atColumn: 0) as? RowCell)?.ageColumn = age
       }
     }
-    if !diff.removed.isEmpty || !diff.inserted.isEmpty {
-      table.beginUpdates()
-      table.removeRows(at: IndexSet(diff.removed), withAnimation: [])
-      table.insertRows(at: IndexSet(diff.inserted), withAnimation: [])
-      table.endUpdates()
-    }
-    for row in diff.updated { reconfigure(row) }
-    resized()
-    table.updateHover()
   }
 
   private func reconfigure(_ row: Int) {
@@ -107,14 +132,24 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
       rows[row], onLoadMore: onLoadMore)
   }
 
-  /// The repository column follows the window's width, in place.
-  @objc private func resized() {
-    let column = Metrics.repoColumn(multiOwner: multiOwner, width: scrollView.contentSize.width)
-    guard column != repoColumn else { return }
-    repoColumn = column
-    table.enumerateAvailableRowViews { rowView, _ in
-      (rowView.view(atColumn: 0) as? RowCell)?.repoColumn = column
-    }
+  /// Drops every queue's kept place, for another account; the next rows
+  /// shown replace the list.
+  func forgetPlaces() {
+    places = [:]
+    queue = nil
+  }
+
+  /// Moves the keys to the sidebar.
+  var toSidebar: () -> Void {
+    get { table.toSidebar }
+    set { table.toSidebar = newValue }
+  }
+
+  /// Selects the first row that acts, when none is selected.
+  func selectFirstIfNone() {
+    guard table.selectedRow < 0, let row = nextSelectable(rows, from: nil, step: 1) else { return }
+    table.selectRowIndexes([row], byExtendingSelection: false)
+    table.scrollRowToVisible(row)
   }
 
   func stage(hoveredRow: Int?, selectedRow: Int?, scroll: CGFloat?) {
@@ -133,6 +168,11 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
   }
 
   /// A floating heading can ask about its row after the rows shrank.
+  func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+    guard rows.indices.contains(row), case .item = rows[row].content else { return Metrics.rowHeight }
+    return Metrics.itemRowHeight
+  }
+
   func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
     rows.indices.contains(row) && rows[row].isHeading
   }
@@ -152,7 +192,6 @@ final class InboxList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     let cell =
       tableView.makeView(withIdentifier: identifier, owner: nil) as? RowCell ?? RowCell.make(for: model)
     cell.identifier = identifier
-    cell.repoColumn = repoColumn
     cell.ageColumn = ageColumn
     cell.configure(model, onLoadMore: onLoadMore)
     return cell
@@ -249,6 +288,8 @@ final class HoverTable: NSTableView {
   var activate: (Int) -> Void = { _ in }
   /// The right-click menu for a row, set by the list.
   var contextMenu: (Int) -> NSMenu? = { _ in nil }
+  /// Moves the keys to the sidebar, set by the window.
+  var toSidebar: () -> Void = {}
   /// What Edit > Copy takes from a row, set by the list.
   var copyText: (Int) -> String? = { _ in nil }
 
@@ -297,6 +338,10 @@ final class HoverTable: NSTableView {
       return
     case .carriageReturn?, .enter?:
       if let current { activate(current) }
+      return
+    case .leftArrow?:
+      guard event.modifierFlags.intersection([.command, .option, .shift]).isEmpty else { break }
+      toSidebar()
       return
     default:
       if event.charactersIgnoringModifiers == "\u{1b}" {

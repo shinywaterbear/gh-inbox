@@ -27,10 +27,6 @@ public final class InboxModel {
     if inbox.loadMore(section) { pump() }
   }
 
-  public func setReviewDirectOnly(_ directOnly: Bool) {
-    if inbox.setReviewDirectOnly(directOnly) { pump() } else { changed() }
-  }
-
   public func setOwnerFilter(_ filter: OwnerFilter) {
     inbox.ownerFilter = filter
     changed()

@@ -38,12 +38,14 @@ extension NSView {
   }
 
   /// Places `view`'s alignment rect at `x`, `width` wide (its natural width
-  /// when nil), centered vertically. Returns the alignment rect.
+  /// when nil), centered on `centerY` (the middle when nil). Returns the
+  /// alignment rect.
   @discardableResult
-  func place(_ view: NSView, x: CGFloat, width: CGFloat? = nil) -> NSRect {
+  func place(_ view: NSView, x: CGFloat, width: CGFloat? = nil, centerY: CGFloat? = nil) -> NSRect {
     let size = view.naturalSize
     let rect = NSRect(
-      x: x, y: (bounds.height - size.height) / 2, width: max(0, width ?? size.width), height: size.height)
+      x: x, y: (centerY ?? bounds.height / 2) - size.height / 2, width: max(0, width ?? size.width),
+      height: size.height)
     // The frame snaps to device pixels, as auto layout's does.
     var frame = view.frame(forAlignmentRect: rect)
     let scale = window?.backingScaleFactor ?? 2

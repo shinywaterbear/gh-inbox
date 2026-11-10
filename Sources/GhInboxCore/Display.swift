@@ -39,6 +39,8 @@ public struct Notice: Sendable, Equatable {
 /// A row's identity across renders, so a list can update rows in place.
 public enum RowID: Sendable, Hashable {
   case heading(section: Int)
+  /// A group of the queue's items, by `Item.tier`.
+  case group(section: Int, tier: Int)
   /// The section's error first, then its warnings.
   case notice(section: Int, ordinal: Int)
   case item(section: Int, url: String)
@@ -64,6 +66,8 @@ public struct ItemRow: Sendable, Equatable {
   public var title: String
   public var kind: Kind
   public var dot: Dot
+  /// Off where a group heading already names the state.
+  public var showsBadge: Bool
   public var route: String?
   /// Blank when it's the viewer.
   public var author: String
@@ -160,47 +164,144 @@ public struct RowModel: Sendable, Equatable, Identifiable {
   }
 }
 
-public func rows(_ inbox: Inbox, now: Now) -> [RowModel] {
-  var result: [RowModel] = []
-  let common = inbox.commonError != nil
-  let shown = inbox.visible()
-  let owners = Set(
-    zip(inbox.sections, shown).flatMap { section, shown in shown.map { section.items[$0].owner } })
-  let viewer = inbox.identity?.login
-  for (s, (section, shown)) in zip(inbox.sections, shown).enumerated() {
-    let heading = HeadingRow(
-      name: section.name, mark: headingMark(section, shown: shown.count), ruled: !result.isEmpty)
-    result.append(RowModel(id: .heading(section: s), content: .heading(heading)))
-    var notices: [Notice] = []
-    if let error = section.error, !common {
-      let age = section.fetchedAt.map { " Showing results from \(ago($0, now.instant))." } ?? ""
-      notices.append(Notice(text: error.described + age, tone: .error))
-    }
-    notices += section.warnings.map { Notice(text: $0.described, tone: .warning) }
-    for (ordinal, notice) in notices.enumerated() {
-      result.append(RowModel(id: .notice(section: s, ordinal: ordinal), content: .notice(notice)))
-    }
-    for index in shown {
-      let item = section.items[index]
-      let row = itemRow(
-        item, check: inbox.check(item), multiOwner: owners.count > 1, viewer: viewer, now: now)
-      result.append(RowModel(id: .item(section: s, url: item.url), content: .item(row)))
-    }
-    if section.truncated {
-      // The owner tabs filter only what's already fetched.
-      let beforeFilter = inbox.ownerFilter == .all ? "" : ", before the Personal/Org filter"
-      // The shown count is named apart only when decoding, deduplication or
-      // the filter made it differ from what GitHub returned.
-      let fetched = "the newest \(section.returned) of \(section.total) matches\(beforeFilter)"
-      let note = shown.count == section.returned ? "Showing \(fetched)" : "\(shown.count) shown of \(fetched)"
-      let url = searchURL(s, host: inbox.identity?.host ?? "github.com", directOnly: inbox.reviewDirectOnly)
-      let more: CutOffRow.More =
-        section.expanding ? .loading : section.canLoadMore ? .button("Load \(pageStep) more") : .none
-      let cut = CutOffRow(section: s, more: more, note: note, url: url)
-      result.append(RowModel(id: .cutOff(section: s), content: .cutOff(cut)))
+/// A queue's entry in the sidebar.
+public struct QueueModel: Sendable, Equatable {
+  public var section: Int
+  public var name: String
+  /// The sidebar heading it sits under.
+  public var group: String
+  /// GitHub's total for the queue's search, before deduplication and the
+  /// owner filter; nil until it has loaded.
+  public var count: Int?
+  public var status: QueueStatus
+}
+
+public enum QueueStatus: Sendable, Equatable {
+  case ready
+  /// Never loaded, and a fetch is running.
+  case loading
+  /// The latest refresh failed; the rows are from an earlier one.
+  case stale
+  /// Never loaded, and the last fetch failed.
+  case failed
+  /// Never loaded, and nothing asked yet.
+  case unknown
+
+  init(_ section: SectionView) {
+    if section.loaded {
+      self = section.error == nil ? .ready : .stale
+    } else if section.busy {
+      self = .loading
+    } else {
+      self = section.error == nil ? .unknown : .failed
     }
   }
+}
+
+/// The queues to list, in order. The team queue drops out for an account
+/// that can't be on a team.
+public func queues(_ inbox: Inbox) -> [QueueModel] {
+  sections.indices.filter { $0 != teamSection || inbox.showTeamQueue }.map { s in
+    let section = inbox.sections[s]
+    return QueueModel(
+      section: s, name: sections[s].name, group: sections[s].group,
+      count: section.loaded ? section.total : nil, status: QueueStatus(section))
+  }
+}
+
+/// Every listed queue in one list, each under its heading.
+public func rows(_ inbox: Inbox, now: Now) -> [RowModel] {
+  var result: [RowModel] = []
+  let visible = inbox.visible()
+  for queue in queues(inbox) {
+    let s = queue.section
+    let heading = HeadingRow(
+      name: queue.name, mark: headingMark(inbox.sections[s], shown: visible[s].count), ruled: !result.isEmpty)
+    result.append(RowModel(id: .heading(section: s), content: .heading(heading)))
+    for (ordinal, notice) in notices(inbox, queue: s, now: now).enumerated() {
+      result.append(RowModel(id: .notice(section: s, ordinal: ordinal), content: .notice(notice)))
+    }
+    result += rows(inbox, queue: s, now: now)
+  }
   return result
+}
+
+/// A queue's latest failure, with the age of the rows it kept, then its
+/// warnings. A failure every queue shares is a banner of its own instead.
+public func notices(_ inbox: Inbox, queue s: Int, now: Now) -> [Notice] {
+  let section = inbox.sections[s]
+  var result: [Notice] = []
+  if let error = section.error, inbox.commonError == nil {
+    let age = section.fetchedAt.map { " Showing results from \(ago($0, now.instant))." } ?? ""
+    result.append(Notice(text: error.described + age, tone: .error))
+  }
+  return result + section.warnings.map { Notice(text: $0.described, tone: .warning) }
+}
+
+/// Group names for `Ranking.merge`, by tier.
+private let mergeGroups = ["Approved", "Changes requested", "Awaiting review", "Drafts"]
+
+/// One queue's items (grouped where its order has groups), and a closing
+/// row when fewer show than GitHub matched. Its notices are banners
+/// (`banners(_:queue:now:)`).
+public func rows(_ inbox: Inbox, queue s: Int, now: Now) -> [RowModel] {
+  var result: [RowModel] = []
+  let section = inbox.sections[s]
+  let shown = inbox.visible()[s]
+  let owners = Set(shown.map { section.items[$0].owner })
+  let viewer = inbox.identity?.login
+  let ranking = sections[s].ranking
+  let grouped = ranking == .merge
+  var tier: Int?
+  for index in shown {
+    let item = section.items[index]
+    if grouped, item.tier(ranking) != tier {
+      let next = item.tier(ranking)
+      tier = next
+      let count = shown.filter { section.items[$0].tier(ranking) == next }.count
+      let heading = HeadingRow(
+        name: mergeGroups[next], mark: .count(count, dim: false), ruled: result.contains(where: \.isHeading))
+      result.append(RowModel(id: .group(section: s, tier: next), content: .heading(heading)))
+    }
+    var row = itemRow(
+      item, check: inbox.check(item), multiOwner: owners.count > 1, viewer: viewer, now: now)
+    row.showsBadge = !grouped
+    result.append(RowModel(id: .item(section: s, url: item.url), content: .item(row)))
+  }
+  if section.loaded, section.truncated || shown.count < section.total {
+    let url = searchURL(s, host: inbox.identity?.host ?? "github.com")
+    let more: CutOffRow.More =
+      section.expanding ? .loading : section.canLoadMore ? .button("Load \(pageStep) more") : .none
+    let cut = CutOffRow(section: s, more: more, note: shortfall(inbox, queue: s), url: url)
+    result.append(RowModel(id: .cutOff(section: s), content: .cutOff(cut)))
+  }
+  return result
+}
+
+/// Why a queue shows fewer rows than GitHub matched.
+func shortfall(_ inbox: Inbox, queue s: Int) -> String {
+  let section = inbox.sections[s]
+  let unique = inbox.deduplicated()[s].count
+  let shown = inbox.visible()[s].count
+  let fetched =
+    section.truncated
+    ? "the newest \(section.returned) of \(section.total) matches" : "\(section.total) matches"
+  var reasons: [String] = []
+  let elsewhere = section.items.count - unique
+  if elsewhere > 0 { reasons.append("\(elsewhere) in other queues") }
+  if unique > shown { reasons.append("\(unique - shown) hidden by the Personal/Org filter") }
+  let lost = section.returned - section.items.count
+  if lost > 0 { reasons.append("\(lost) unreadable or withheld") }
+  if shown == section.returned && section.truncated { return "Showing \(fetched)" }
+  return "\(shown) shown of \(fetched)" + (reasons.isEmpty ? "" : "; " + reasons.joined(separator: ", "))
+}
+
+/// What an empty queue says, when nothing it matched is shown elsewhere,
+/// filtered out or held back.
+public func emptyText(_ inbox: Inbox, queue s: Int) -> String? {
+  let section = inbox.sections[s]
+  guard section.loaded, section.total == 0, section.warnings.isEmpty, section.error == nil else { return nil }
+  return sections[s].empty
 }
 
 func itemRow(_ item: Item, check: CheckView?, multiOwner: Bool, viewer: String?, now: Now) -> ItemRow {
@@ -220,7 +321,7 @@ func itemRow(_ item: Item, check: CheckView?, multiOwner: Bool, viewer: String?,
   return ItemRow(
     url: item.url, owner: multiOwner ? String(item.owner) : nil, repo: item.repository.name,
     number: item.number, reference: "\(item.repository.nameWithOwner)#\(item.number)",
-    title: item.title, kind: kind, dot: dot, route: route, author: author,
+    title: item.title, kind: kind, dot: dot, showsBadge: true, route: route, author: author,
     age: age(item.updatedAt, now: now) ?? "", toolTip: toolTip,
     accessibilityLabel: spoken.compactMap { $0 }.joined(separator: ", "))
 }
@@ -270,13 +371,16 @@ public struct Header: Sendable, Equatable {
   public var busy: Bool
 }
 
-public func header(_ inbox: Inbox, rows: [RowModel], now: Now) -> Header {
+/// Counts each item shown in any queue once.
+public func header(_ inbox: Inbox, now: Now) -> Header {
   var (prs, drafts, issues) = (0, 0, 0)
-  for case .item(let item) in rows.map(\.content) {
-    switch item.kind {
-    case .draft: drafts += 1
-    case .issue: issues += 1
-    case .pullRequest, .approved, .changes: prs += 1
+  for (section, shown) in zip(inbox.sections, inbox.visible()) {
+    for index in shown {
+      switch Kind(section.items[index]) {
+      case .draft: drafts += 1
+      case .issue: issues += 1
+      case .pullRequest, .approved, .changes: prs += 1
+      }
     }
   }
   let busy = inbox.anyBusy
@@ -303,8 +407,9 @@ public func header(_ inbox: Inbox, rows: [RowModel], now: Now) -> Header {
   return Header(title: title, summary: summary.joined(separator: " · "), busy: busy)
 }
 
-/// Problems that aren't tied to a section, above the list; long ones show in full on hover.
-public func banners(_ inbox: Inbox, now: Now) -> [Notice] {
+/// Problems above the list: those not tied to a queue, then `queue`'s own
+/// (`notices`); long ones show in full on hover.
+public func banners(_ inbox: Inbox, queue: Int? = nil, now: Now) -> [Notice] {
   var result: [Notice] = []
   if let error = inbox.commonError {
     let age = inbox.updated.map { " Showing results from \(ago($0, now.instant))." } ?? ""
@@ -314,6 +419,7 @@ public func banners(_ inbox: Inbox, now: Now) -> [Notice] {
     result.append(
       Notice(text: "Couldn't load checks for \(counted(count, "PR")): \(error.described)", tone: .warning))
   }
+  if let queue { result += notices(inbox, queue: queue, now: now) }
   return result
 }
 

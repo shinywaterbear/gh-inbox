@@ -53,9 +53,9 @@ public enum OwnerFilter: Sendable, CaseIterable {
   }
 }
 
-/// One request to make. `directOnly` is set only for `reviewSection`.
+/// One request to make.
 public enum Job: Sendable, Equatable {
-  case section(index: Int, size: Int, directOnly: Bool)
+  case section(index: Int, size: Int)
   case checks(ids: [String])
   case membership
 }
@@ -86,8 +86,8 @@ extension GitHub {
   /// Runs one job with the round's credential.
   func perform(_ job: Job, as credential: Credential) async -> Outcome {
     switch job {
-    case .section(let index, let size, let directOnly):
-      .section(await section(index, size: size, directOnly: directOnly, as: credential))
+    case .section(let index, let size):
+      .section(await section(index, size: size, as: credential))
     case .checks(let ids): .checks(await checks(ids, as: credential))
     case .membership: .membership(await membership(as: credential))
     }
@@ -167,7 +167,6 @@ public struct SectionView: Sendable {
 struct Queued {
   var index: Int
   var size: Int
-  var directOnly: Bool
   /// The round its result will count as.
   var round: UInt64
 }
@@ -184,13 +183,8 @@ public enum CheckView: Sendable, Equatable {
 
 public struct Inbox: Sendable {
   public var identity: Identity?
-  /// The review entry belongs to the selected `reviewDirectOnly` mode.
   public internal(set) var sections: [SectionView] = GhInboxCore.sections.map { SectionView(name: $0.name) }
   public var ownerFilter = OwnerFilter.all
-  public private(set) var reviewDirectOnly = false
-  /// The review section in the mode not selected, so neither mode's rows,
-  /// counts or errors ever show under the other.
-  var reviewParked = SectionView(name: GhInboxCore.sections[reviewSection].name)
   /// The section each item's row is in, by URL (`placeRows`).
   var placed: [String: Int] = [:]
   var membership = MembershipCheck.due
@@ -225,8 +219,7 @@ public struct Inbox: Sendable {
   /// Queues a selected section at the current round.
   mutating func queueSection(_ index: Int, size: Int) {
     sections[index].busy = true
-    sectionsQueued.append(
-      Queued(index: index, size: size, directOnly: index == reviewSection && reviewDirectOnly, round: round))
+    sectionsQueued.append(Queued(index: index, size: size, round: round))
   }
 
   /// Queues the section again, one step larger. Its rows and size stay until
@@ -246,35 +239,13 @@ public struct Inbox: Sendable {
     queueSection(index, size: size)
   }
 
-  /// Teams exist only in organizations, so without a membership both review
-  /// searches match the same requests.
-  public var showDirectOnly: Bool {
-    membership == .answered(.member) || membership == .answered(.unknown)
+  /// Teams exist only in organizations, so without a membership nothing
+  /// can reach the viewer through one.
+  public var showTeamQueue: Bool {
+    membership != .answered(.none)
   }
 
   public var showOwnerTabs: Bool { mixedOwners }
-
-  /// Shows the chosen mode's own review results and refetches them. Returns
-  /// whether anything changed.
-  @discardableResult
-  public mutating func setReviewDirectOnly(_ directOnly: Bool) -> Bool {
-    if reviewDirectOnly == directOnly { return false }
-    let left = reviewDirectOnly
-    reviewDirectOnly = directOnly
-    let shown = sections[reviewSection]
-    sections[reviewSection] = reviewParked
-    reviewParked = shown
-    let queued = sectionsQueued.count
-    sectionsQueued.removeAll { $0.index == reviewSection && $0.directOnly == left }
-    if sectionsQueued.count < queued { reviewParked.busy = false }
-    placeRows(answered: nil)
-    trackChecks(reviewSection)
-    if !sections[reviewSection].busy {
-      round += 1
-      queueSection(reviewSection, size: sections[reviewSection].size)
-    }
-    return true
-  }
 
   /// The next job to start, if a slot is free. Sections go first, so rows
   /// never wait behind check lookups.
@@ -284,7 +255,7 @@ public struct Inbox: Sendable {
     let jobRound: UInt64
     if !sectionsQueued.isEmpty {
       let q = sectionsQueued.removeFirst()
-      job = .section(index: q.index, size: q.size, directOnly: q.directOnly)
+      job = .section(index: q.index, size: q.size)
       jobRound = q.round
     } else if membership == .due {
       membership = .asked
@@ -316,26 +287,21 @@ public struct Inbox: Sendable {
     if switched { reset() }
     if let answered { identity = answered }
     switch (ticket.job, outcome) {
-    case (.section(let index, let size, let directOnly), .section(let fetch)):
+    case (.section(let index, let size), .section(let fetch)):
       // After a switch the section was reset to idle; this result still
       // belongs to the new account.
-      let selected = index != reviewSection || directOnly == reviewDirectOnly
-      var section = selected ? sections[index] : reviewParked
-      let expansion = size > section.size
-      let loaded = section.apply(size: size, round: ticket.round, fetch: fetch, now: now)
-      if section.expanding && (expansion || !section.canLoadMore) { section.expanding = false }
-      if selected {
-        sections[index] = section
-        placeRows(answered: loaded ? index : nil)
-        if loaded {
-          trackChecks(index)
-          noteOwners()
-        }
-        // A "Load more" that arrived during a refresh.
-        if sections[index].expanding && !sections[index].busy { expand(index) }
-      } else {
-        reviewParked = section
+      let expansion = size > sections[index].size
+      let loaded = sections[index].apply(size: size, round: ticket.round, fetch: fetch, now: now)
+      if sections[index].expanding && (expansion || !sections[index].canLoadMore) {
+        sections[index].expanding = false
       }
+      placeRows(answered: loaded ? index : nil)
+      if loaded {
+        trackChecks(index)
+        noteOwners()
+      }
+      // A "Load more" that arrived during a refresh.
+      if sections[index].expanding && !sections[index].busy { expand(index) }
     case (.membership, .membership(let fetch)):
       membership = .answered(fetch.membership)
     case (.checks, .checks(let fetch)):

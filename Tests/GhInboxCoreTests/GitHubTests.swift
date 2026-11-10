@@ -3,8 +3,10 @@ import Testing
 
 @testable import GhInboxCore
 
-private let review = 0
-private let authored = 1
+/// The queue most decoding tests use: its search also reads review requests.
+private let review = teamSection
+private let direct = 0
+private let authored = 2
 
 /// A section that loaded, and its warnings.
 private func page(_ fetch: SectionFetch) throws -> (Page, [GhError]) {
@@ -45,13 +47,13 @@ private func conn(_ nodes: JSON) -> JSON {
   return ["issueCount": .int(count), "pageInfo": ["hasNextPage": false], "nodes": nodes]
 }
 
-/// `review` and `authored` as given; the other two sections empty. Each
-/// section's request reads only its own alias.
-private func response(_ review: JSON, _ authored: JSON) -> JSON {
+/// `review` (the team queue) and `authored` as given; the others empty.
+/// Each section's request reads only its own alias.
+private func response(_ review: JSON, _ authored: JSON, direct: JSON = conn([])) -> JSON {
   [
     "data": [
       "viewer": ["login": "me", "url": "https://github.com/me"],
-      "review": review, "authored": authored,
+      "direct": direct, "team": review, "authored": authored,
       "assigned": conn([]), "personal": conn([]),
     ]
   ]
@@ -79,12 +81,12 @@ struct SectionRequestTests {
   @Test func eachSectionSendsOneSearchOfTheSizeAsked() async throws {
     for (index, spec) in sections.enumerated() {
       let sent = try await sentQuery { _ = await $0.section(index, size: 50) }
-      let query = search(index, directOnly: false)
+      let query = search(index)
       #expect(sent.contains("\(spec.alias): search(query: \"\(query)\", type: ISSUE, first: 50)"))
       #expect(sent.components(separatedBy: "search(").count == 2)
       #expect(query.hasSuffix(" sort:updated-desc"), "\(spec.alias)")
       #expect(sent.contains("fragment items on SearchResultItemConnection"))
-      #expect(sent.contains("reviewRequests") == (index == review), "only the review section reads requests")
+      #expect(sent.contains("reviewRequests") == (index == teamSection), "only the team queue reads requests")
       #expect(!sent.contains("statusCheckRollup"), "checks load separately")
     }
   }
@@ -110,20 +112,18 @@ struct SectionRequestTests {
     }
   }
 
-  @Test func directOnlySwapsOneQualifierAndTheLinkFollows() async throws {
-    let any = search(review, directOnly: false)
-    let direct = search(review, directOnly: true)
-    #expect(any.replacingOccurrences(of: "review-requested", with: "user-review-requested") == direct)
-    for (directOnly, expected) in [(false, any), (true, direct)] {
-      let sent = try await sentQuery { _ = await $0.section(review, directOnly: directOnly) }
-      #expect(sent.contains("query: \"\(expected)\""))
-      #expect(sent.contains("reviewRequests") == !directOnly)
+  /// Together the two review queues are `review-requested:@me`: by name,
+  /// and everything else, so a PR asked both ways is only in the first.
+  @Test func theReviewQueuesSplitOneSearchByName() async throws {
+    #expect(search(direct) == "is:open is:pr archived:false user-review-requested:@me sort:updated-desc")
+    #expect(
+      search(review)
+        == "is:open is:pr archived:false review-requested:@me -user-review-requested:@me sort:updated-desc")
+    for index in [direct, review] {
+      let sent = try await sentQuery { _ = await $0.section(index) }
+      #expect(sent.contains("query: \"\(search(index))\""))
       #expect(
-        searchURL(review, host: "github.com", directOnly: directOnly)
-          == "https://github.com/search?type=issues&q=\(encode(expected))")
-    }
-    for index in 1..<sections.count {
-      #expect(search(index, directOnly: true) == search(index, directOnly: false))
+        searchURL(index, host: "github.com").hasPrefix("https://github.com/search?type=pullrequests&q="))
     }
   }
 
@@ -145,7 +145,7 @@ struct SectionRequestTests {
 private func failing(_ answer: Answer, timeout: Duration = .seconds(10)) async -> GhError? {
   let server = answering(answer)
   let fetch = await server.github(timeout: timeout).section(
-    review, size: 25, directOnly: false, as: server.credential)
+    review, size: 25, as: server.credential)
   let error = unavailable(fetch)
   if let error { #expect(!error.described.contains(server.token), "the token never shows") }
   return error
@@ -182,7 +182,7 @@ struct TokenSafetyTests {
       // A fake can't finish a refused redirect, so it ends at the timeout;
       // over the network the 307 itself is the reply.
       let fetch = await server.github(timeout: .seconds(1)).section(
-        review, size: 25, directOnly: false, as: server.credential)
+        review, size: 25, as: server.credential)
       #expect(fetch.page.failure != nil)
       #expect(
         server.received.allSatisfy { !$0.url.contains("elsewhere.example") }, "the token stays on GitHub")
@@ -254,15 +254,15 @@ struct FailureTests {
 
   @Test func aFailedSearchStillNamesTheAccount() async {
     var json = response(nil, conn([]))
-    json["errors"] = [["type": "FORBIDDEN", "path": ["review"], "message": "Resource not accessible"]]
-    let fetch = await responding(json).section(review, size: 25, directOnly: false)
+    json["errors"] = [["type": "FORBIDDEN", "path": ["team"], "message": "Resource not accessible"]]
+    let fetch = await responding(json).section(review, size: 25)
     #expect(fetch.identity != nil)
     #expect(kind(fetch.page.failure) == "forbidden")
   }
 
   @Test func aMalformedSectionIsAParseError() async {
     let json = response(["nodes": "not a list"], conn([]))
-    let fetch = await responding(json).section(review, size: 25, directOnly: false)
+    let fetch = await responding(json).section(review, size: 25)
     #expect(kind(fetch.page.failure) == "parse")
   }
 
@@ -306,12 +306,12 @@ struct FailureTests {
     var json = response(conn([nil, pr(2, "2026-11-01T00:00:00Z")]), conn([]))
     json["errors"] = [
       [
-        "type": "FORBIDDEN", "path": ["review", "nodes", 0],
+        "type": "FORBIDDEN", "path": ["team", "nodes", 0],
         "message":
           "Although you appear to have the correct authorization credentials, the `o` organization has an IP allow list enabled, and your IP address is not permitted to access this resource.",
       ]
     ]
-    let (_, warnings) = try await page(responding(json).section(review, size: 25, directOnly: false))
+    let (_, warnings) = try await page(responding(json).section(review, size: 25))
     #expect(warnings.count == 1 && kind(warnings.first) == "ipRestricted")
     #expect(warnings.first?.hint?.contains("VPN") == true)
   }
@@ -323,7 +323,7 @@ struct PartialResultTests {
     broken["title"] = nil
     let json = response(conn([broken, pr(3, "2026-11-01T00:00:00Z")]), conn([]))
     let (found, warnings) = try await page(
-      responding(json).section(review, size: 25, directOnly: false))
+      responding(json).section(review, size: 25))
     #expect(found.items.count == 1)
     #expect(warnings == [.unreadable(1)])
   }
@@ -332,11 +332,11 @@ struct PartialResultTests {
     var json = response(conn([nil, pr(2, "2026-11-01T00:00:00Z")]), conn([]))
     json["errors"] = [
       [
-        "type": "FORBIDDEN", "path": ["review", "nodes", 0],
+        "type": "FORBIDDEN", "path": ["team", "nodes", 0],
         "message": "Resource protected by organization SAML enforcement.",
       ]
     ]
-    let (found, warnings) = try await page(responding(json).section(review, size: 25, directOnly: false))
+    let (found, warnings) = try await page(responding(json).section(review, size: 25))
     #expect(found.items.count == 1)
     #expect(warnings.count == 1 && kind(warnings.first) == "forbidden")
   }
@@ -344,7 +344,7 @@ struct PartialResultTests {
   @Test func unexplainedMissingItemsStillWarn() async throws {
     let json = response(conn([nil]), conn([]))
     let (_, warnings) = try await page(
-      responding(json).section(review, size: 25, directOnly: false))
+      responding(json).section(review, size: 25))
     #expect(warnings == [.withheld(1)])
   }
 
@@ -352,12 +352,12 @@ struct PartialResultTests {
     var json = response(conn([pr(4, "2026-11-01T00:00:00Z")]), conn([]))
     json["errors"] = [
       [
-        "type": "FORBIDDEN", "path": ["review", "nodes", 0, "commits"],
+        "type": "FORBIDDEN", "path": ["team", "nodes", 0, "commits"],
         "message": "Resource not accessible by integration",
       ]
     ]
     let (found, warnings) = try await page(
-      responding(json).section(review, size: 25, directOnly: false))
+      responding(json).section(review, size: 25))
     #expect(found.items.count == 1)
     #expect(warnings.count == 1 && kind(warnings.first) == "forbidden")
   }
@@ -365,41 +365,49 @@ struct PartialResultTests {
   @Test func errorsWithoutAPathWarnTheSectionThatAsked() async throws {
     var json = response(conn([]), conn([]))
     json["errors"] = [["type": "INTERNAL", "message": "Something went wrong"]]
-    let (_, warnings) = try await page(responding(json).section(review, size: 25, directOnly: false))
+    let (_, warnings) = try await page(responding(json).section(review, size: 25))
     #expect(warnings == [.github("Something went wrong")])
   }
 
   @Test func truncatedSectionsSaySoAndLinkTheFullSearch() async throws {
     var json = response(conn([pr(1, "2026-11-01T00:00:00Z")]), conn([]))
-    json["data"]["review"]["issueCount"] = 342
-    json["data"]["review"]["pageInfo"]["hasNextPage"] = true
-    let (found, _) = try await page(responding(json).section(review, size: 25, directOnly: false))
+    json["data"]["team"]["issueCount"] = 342
+    json["data"]["team"]["pageInfo"]["hasNextPage"] = true
+    let (found, _) = try await page(responding(json).section(review, size: 25))
     #expect(found.truncated)
     #expect(found.total == 342)
     #expect(
-      searchURL(review, host: "github.com", directOnly: false)
-        == "https://github.com/search?type=issues&q=is%3Aopen%20is%3Apr%20archived%3Afalse%20review-requested%3A%40me%20sort%3Aupdated-desc"
+      searchURL(direct, host: "github.com")
+        == "https://github.com/search?type=pullrequests&q=is%3Aopen%20user-review-requested%3A%40me%20sort%3Aupdated-desc"
     )
     #expect(
-      searchURL(review, host: "github.com", directOnly: true)
-        == "https://github.com/search?type=issues&q=is%3Aopen%20is%3Apr%20archived%3Afalse%20user-review-requested%3A%40me%20sort%3Aupdated-desc"
+      searchURL(review, host: "github.com")
+        == "https://github.com/search?type=pullrequests&q=is%3Aopen%20review-requested%3A%40me%20-user-review-requested%3A%40me%20sort%3Aupdated-desc"
     )
+    // GitHub's web search rejects `archived:`, and `is:pr` under issues.
+    for index in sections.indices {
+      let url = searchURL(index, host: "github.com")
+      #expect(!url.contains("archived") && !url.contains("is%3Apr"), "\(url)")
+    }
+    #expect(
+      searchURL(4, host: "github.com")
+        == "https://github.com/search?type=issues&q=is%3Aopen%20user%3A%40me%20sort%3Aupdated-desc")
   }
 
   @Test func searchLinksFollowTheViewersHost() async throws {
     var json = response(conn([]), conn([]))
     json["data"]["viewer"]["url"] = "https://ghe.example.com/me"
-    let host = try #require(await responding(json).section(review, size: 25, directOnly: false).identity)
+    let host = try #require(await responding(json).section(review, size: 25).identity)
       .host
     #expect(host == "ghe.example.com")
-    #expect(searchURL(review, host: host, directOnly: false).hasPrefix("https://ghe.example.com/search?"))
+    #expect(searchURL(review, host: host).hasPrefix("https://ghe.example.com/search?"))
   }
 
   @Test func pageCountsWhatGitHubReturnedNotWhatSurvived() async throws {
     var broken = pr(8, "2026-11-01T00:00:00Z")
     broken["title"] = nil
     let json = response(conn([broken, nil, pr(9, "2026-11-01T00:00:00Z")]), conn([]))
-    let (found, _) = try await page(responding(json).section(review, size: 25, directOnly: false))
+    let (found, _) = try await page(responding(json).section(review, size: 25))
     #expect(found.returned == 3 && found.items.count == 1)
   }
 }
@@ -413,7 +421,7 @@ struct ItemTests {
         pr(3, "2026-10-01T00:00:00Z", decision: "REVIEW_REQUIRED"),
         pr(4, "2026-11-02T00:00:00Z"),
       ]), conn([]))
-    let numbers = try await items(responding(json).section(review, size: 25, directOnly: false)).map(
+    let numbers = try await items(responding(json).section(review, size: 25)).map(
       \.number)
     #expect(numbers == [4, 3, 2, 1])
   }
@@ -432,7 +440,7 @@ struct ItemTests {
         pr(5, "2026-11-01T00:00:00Z", decision: "APPROVED"),
         pr(6, "2026-10-31T00:00:00Z", decision: "CHANGES_REQUESTED"),
       ]))
-    let numbers = try await items(responding(json).section(authored, size: 25, directOnly: false)).map(
+    let numbers = try await items(responding(json).section(authored, size: 25)).map(
       \.number)
     #expect(numbers == [4, 5, 3, 6, 2, 1])
   }
@@ -459,7 +467,7 @@ struct ItemTests {
     var item = pr(6, "2026-11-01T00:00:00Z")
     item["author"] = nil
     let found = try await items(
-      responding(response(conn([item]), conn([]))).section(review, size: 25, directOnly: false))
+      responding(response(conn([item]), conn([]))).section(review, size: 25))
     #expect(found[0].author == ghost)
   }
 
@@ -468,7 +476,7 @@ struct ItemTests {
     item["latestOpinionatedReviews"]["nodes"] = [["state": "APPROVED"], nil]
     let found = try await items(
       responding(response(conn([item]), conn([]))).section(
-        review, size: 25, directOnly: false))
+        review, size: 25))
     #expect(found[0].review == nil)
   }
 
@@ -479,7 +487,7 @@ struct ItemTests {
     personal["repository"]["owner"] = ["__typename": "User"]
     let found = try await items(
       responding(response(conn([org, personal]), conn([])))
-        .section(review, size: 25, directOnly: false))
+        .section(review, size: 25))
     #expect(found.first { $0.number == 11 }?.repository.ownerKind == .organization)
     #expect(found.first { $0.number == 12 }?.repository.ownerKind == .personal)
   }
@@ -487,7 +495,7 @@ struct ItemTests {
   @Test func aRepositoryWithNoOwnerTypeIsUnknownNotPersonal() async throws {
     let found = try await items(
       responding(response(conn([pr(13, "2026-11-01T00:00:00Z")]), conn([])))
-        .section(review, size: 25, directOnly: false))
+        .section(review, size: 25))
     #expect(found[0].repository.ownerKind == .unknown)
   }
 }
@@ -497,7 +505,7 @@ private func route(_ name: String, _ nodes: JSON, hasNextPage: Bool) async throw
   var item = pr(8, "2026-11-01T00:00:00Z")
   item["reviewRequests"] = ["pageInfo": ["hasNextPage": .bool(hasNextPage)], "nodes": nodes]
   return try await items(
-    responding(response(conn([item]), conn([]))).section(review, size: 25, directOnly: false))[
+    responding(response(conn([item]), conn([]))).section(review, size: 25))[
       0
     ].reviewRoute
 }
@@ -542,15 +550,15 @@ struct ReviewRouteTests {
     #expect(try await route("empty", [], hasNextPage: false) == .unknown)
     let missing = try await items(
       responding(response(conn([pr(9, "2026-11-01T00:00:00Z")]), conn([])))
-        .section(review, size: 25, directOnly: false))
+        .section(review, size: 25))
     #expect(missing[0].reviewRoute == .unknown)
   }
 
-  @Test func theDirectOnlySearchNeedsNoRequestList() async throws {
-    let direct = try await items(
-      responding(response(conn([pr(10, "2026-11-01T00:00:00Z")]), conn([])))
-        .section(review, size: 25, directOnly: true))
-    #expect(direct[0].reviewRoute == .direct)
+  @Test func askedOfMeNeedsNoRequestList() async throws {
+    let asked = try await items(
+      responding(response(conn([]), conn([]), direct: conn([pr(10, "2026-11-01T00:00:00Z")])))
+        .section(direct, size: 25))
+    #expect(asked[0].reviewRoute == .direct)
   }
 
   @Test func otherSectionsHaveNoReviewRoute() async throws {
@@ -558,7 +566,7 @@ struct ReviewRouteTests {
     item["reviewRequests"] = ["pageInfo": ["hasNextPage": false], "nodes": [team("platform")]]
     let mine = try await items(
       responding(response(conn([]), conn([item])))
-        .section(authored, size: 25, directOnly: false))
+        .section(authored, size: 25))
     #expect(mine[0].reviewRoute == nil)
   }
 }

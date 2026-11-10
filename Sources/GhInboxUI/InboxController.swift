@@ -4,7 +4,7 @@ import GhInboxCore
 /// How often the scheduler checks whether a refresh is due, and ages re-render.
 private let tick: TimeInterval = 10
 
-private let controlsItem = NSToolbarItem.Identifier("controls")
+private let tabsItem = NSToolbarItem.Identifier("tabs")
 private let refreshItem = NSToolbarItem.Identifier("refresh")
 
 private let ownerTabs: [(OwnerFilter, String)] = [
@@ -28,31 +28,48 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
 
   private let tabs = NSSegmentedControl(
     labels: ownerTabs.map(\.1), trackingMode: .selectOne, target: nil, action: nil)
-  private let directOnly = NSButton(checkboxWithTitle: "Direct only", target: nil, action: nil)
-  private let spinner = NSProgressIndicator()
+  private lazy var refreshControl = RefreshControl(target: self, action: #selector(refresh(_:)))
   private let banners = BannerList()
+  private let sidebar = Sidebar()
   private let list = InboxList()
   private let allClear = NSStackView()
+  private let allClearText = label(size: 13, color: .secondaryLabelColor)
+  private let allClearMark = symbol("checkmark.circle", size: 28, color: .tertiaryLabelColor)
+  /// The queue the list shows, by section.
+  private var queue = 0
+  /// Whether the last queue is kept per account, and the account it was
+  /// last restored for.
+  private let remembersQueue: Bool
+  private var restoredFor: Identity?
   private lazy var unavailable = UnavailableView { [weak self] in self?.refresh(nil) }
 
   /// `now` is the wall clock ages are read from, and `timeZone` and
-  /// `locale` how dates read; `restoresFrame` false leaves the saved window
+  /// `locale` how dates read; `remembersQueue` false neither restores nor
+  /// saves the last queue; `restoresFrame` false leaves the saved window
   /// frame alone, for windows that are never shown; `github` is where
   /// requests go.
   public init(
     now: @escaping @MainActor () -> Date = Date.init, timeZone: TimeZone = .current,
     locale: Locale = .current,
-    restoresFrame: Bool = true, github: GitHub = .live()
+    restoresFrame: Bool = true, remembersQueue: Bool = true, github: GitHub = .live()
   ) {
     model = InboxModel(github: github)
+    self.remembersQueue = remembersQueue
     self.now = now
     self.timeZone = timeZone
     self.locale = locale
     let window = NSWindow(
       contentRect: NSRect(origin: .zero, size: Metrics.windowSize),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+      // Full-size content lets the sidebar run the window's height under the
+      // title bar, as Finder's does; without it Tahoe floats it as a panel.
+      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered,
+      defer: false)
     window.title = "gh-inbox"
     window.toolbarStyle = .unified
+    // The title bar over the list takes the list's color with no rule under
+    // it, as Tahoe draws it; older systems paint and rule it otherwise.
+    window.titlebarAppearsTransparent = true
+    window.titlebarSeparatorStyle = .none
     window.contentMinSize = Metrics.windowMinSize
     // Closing only orders the window out, so the Dock icon or ⌘0 brings it back.
     window.isReleasedWhenClosed = false
@@ -62,6 +79,7 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     model.changed = { [weak self] in self?.render() }
     window.delegate = self
     layout(in: window)
+    window.setContentSize(Metrics.windowSize)
     if restoresFrame {
       // Centered only the first time; after that the saved frame is restored.
       if !window.setFrameUsingName("inbox") { window.center() }
@@ -101,11 +119,6 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   private func layout(in window: NSWindow) {
     tabs.target = self
     tabs.action = #selector(chooseTab(_:))
-    directOnly.target = self
-    directOnly.action = #selector(toggleDirectOnly(_:))
-    spinner.style = .spinning
-    spinner.controlSize = .small
-    spinner.isDisplayedWhenStopped = false
 
     let toolbar = NSToolbar(identifier: "inbox")
     toolbar.delegate = self
@@ -113,17 +126,103 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     toolbar.allowsUserCustomization = false
     window.toolbar = toolbar
 
-    let check = symbol("checkmark.circle", size: 28, color: .tertiaryLabelColor)
-    check.symbolConfiguration = .init(pointSize: 28, weight: .light)
-    let message = label(size: 13, color: .secondaryLabelColor)
-    message.stringValue = "Nothing open for you"
-    allClear.setViews([check, message], in: .center)
+    allClearMark.symbolConfiguration = .init(pointSize: 28, weight: .light)
+    allClear.setViews([allClearMark, allClearText], in: .center)
     allClear.orientation = .vertical
     allClear.spacing = 8
     allClear.isHidden = true
-    window.initialFirstResponder = list.keyView
-    window.contentView = RootView(
+
+    let side = NSViewController()
+    // The split view takes its first width from here; moving the divider
+    // afterwards left the title bar's sidebar edge behind it.
+    sidebar.scrollView.frame.size.width = Metrics.sidebarWidth
+    side.view = sidebar.scrollView
+    let sideItem = NSSplitViewItem(sidebarWithViewController: side)
+    sideItem.minimumThickness = Metrics.sidebarMinWidth
+    sideItem.canCollapse = false
+    let content = NSViewController()
+    content.view = RootView(
       banners: banners, list: list.scrollView, allClear: allClear, unavailable: unavailable)
+    let split = NSSplitViewController()
+    let contentItem = NSSplitViewItem(viewController: content)
+    // The list's color runs up under the title bar with no rule between.
+    sideItem.titlebarSeparatorStyle = .none
+    contentItem.titlebarSeparatorStyle = .none
+    split.addSplitViewItem(sideItem)
+    split.addSplitViewItem(contentItem)
+    window.contentViewController = split
+
+    // Tab, and left and right, move the keys between the queues and the list.
+    sidebar.onSelect = { [weak self] section in self?.select(queue: section) }
+    sidebar.toList = { [weak self] in self?.focusList() }
+    list.toSidebar = { [weak self] in self?.focusSidebar() }
+    window.autorecalculatesKeyViewLoop = false
+    sidebar.keyView.nextKeyView = list.keyView
+    list.keyView.nextKeyView = sidebar.keyView
+    window.initialFirstResponder = list.keyView
+  }
+
+  // MARK: Queues
+
+  /// The queues' names, in order, as menu titles; a menu item's tag picks
+  /// one for `showQueue(_:)`.
+  public static let queueTitles = GhInboxCore.sections.map(\.name)
+
+  /// Shows a queue's rows, and remembers it for the account.
+  public func select(queue section: Int) {
+    guard GhInboxCore.sections.indices.contains(section), section != queue else { return }
+    queue = section
+    if remembersQueue, let identity = inbox.identity {
+      UserDefaults.standard.set(GhInboxCore.sections[section].name, forKey: queueKey(identity))
+    }
+    render()
+  }
+
+  @objc public func showQueue(_ sender: NSMenuItem) {
+    select(queue: sender.tag)
+  }
+
+  /// The cut-off row's two buttons, for the keyboard and the menu: arrow
+  /// keys skip that row, so a near-miss click can't act.
+  public static let loadMoreTitle = "Load \(pageStep) More"
+
+  @objc public func loadMoreInQueue(_ sender: Any?) {
+    loadMore(queue)
+  }
+
+  @objc public func openQueueOnGitHub(_ sender: Any?) {
+    let host = inbox.identity?.host ?? "github.com"
+    if let url = URL(string: searchURL(queue, host: host)) { NSWorkspace.shared.open(url) }
+  }
+
+  private func queueKey(_ identity: Identity) -> String {
+    "queue.\(identity.host).\(identity.login)"
+  }
+
+  /// The account's last queue, once per account. Without one, the first
+  /// account keeps the queue already showing; a switched-to account starts
+  /// on the first queue, with none of the last account's places.
+  private func restoreQueue() {
+    guard let identity = inbox.identity, identity != restoredFor else { return }
+    let switched = restoredFor != nil
+    restoredFor = identity
+    if switched {
+      queue = 0
+      list.forgetPlaces()
+    }
+    let saved = remembersQueue ? UserDefaults.standard.string(forKey: queueKey(identity)) : nil
+    if let saved, let section = GhInboxCore.sections.firstIndex(where: { $0.name == saved }) {
+      queue = section
+    }
+  }
+
+  private func focusList() {
+    window?.makeFirstResponder(list.keyView)
+    list.selectFirstIfNone()
+  }
+
+  private func focusSidebar() {
+    window?.makeFirstResponder(sidebar.keyView)
   }
 
   // MARK: Refreshing
@@ -148,10 +247,6 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     model.setOwnerFilter(ownerTabs[sender.selectedSegment].0)
   }
 
-  @objc private func toggleDirectOnly(_ sender: NSButton) {
-    model.setReviewDirectOnly(sender.state == .on)
-  }
-
   // MARK: Menu
 
   /// The owner tabs, in order, as menu titles; a menu item's tag picks one
@@ -161,10 +256,6 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   @objc public func showOwnerTab(_ sender: NSMenuItem) {
     guard ownerTabs.indices.contains(sender.tag) else { return }
     model.setOwnerFilter(ownerTabs[sender.tag].0)
-  }
-
-  @objc public func toggleReviewDirectOnly(_ sender: Any?) {
-    model.setReviewDirectOnly(!inbox.reviewDirectOnly)
   }
 
   /// Ages kept still while the window was closed, so they catch up first.
@@ -178,13 +269,18 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   /// for the toolbar control each mirrors.
   public func validateMenuItem(_ item: NSMenuItem) -> Bool {
     switch item.action {
+    case #selector(loadMoreInQueue(_:)):
+      let section = inbox.sections[queue]
+      return presence != .closed && section.canLoadMore && !section.expanding
+    case #selector(openQueueOnGitHub(_:)):
+      return presence != .closed && inbox.identity != nil
+    case #selector(showQueue(_:)):
+      item.state = item.tag == queue ? .on : .off
+      return presence != .closed && queues(inbox).contains { $0.section == item.tag }
     case #selector(showOwnerTab(_:)):
       guard ownerTabs.indices.contains(item.tag) else { return false }
       item.state = ownerTabs[item.tag].0 == inbox.ownerFilter ? .on : .off
       return presence != .closed && inbox.showOwnerTabs
-    case #selector(toggleReviewDirectOnly(_:)):
-      item.state = inbox.reviewDirectOnly ? .on : .off
-      return presence != .closed && inbox.showDirectOnly
     default:
       return true
     }
@@ -193,7 +289,7 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   // MARK: Toolbar
 
   public func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    [.flexibleSpace, controlsItem, refreshItem]
+    [.sidebarTrackingSeparator, .flexibleSpace, tabsItem, refreshItem]
   }
 
   public func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -206,19 +302,15 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   ) -> NSToolbarItem? {
     let item = NSToolbarItem(itemIdentifier: identifier)
     switch identifier {
-    case controlsItem:
-      let controls = NSStackView(views: [tabs, directOnly, spinner])
-      controls.spacing = 12
-      // Hidden controls keep their slot, so revealing one never moves another.
-      controls.detachesHiddenViews = false
-      item.view = controls
+    case tabsItem:
+      // Shown only for an account with both kinds of repository; right of
+      // a flexible space, appearing never moves the refresh button.
+      item.view = tabs
+      item.label = "Owner"
     case refreshItem:
-      item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")
+      // Turns into a spinner while refreshing, in its own place and size.
+      item.view = refreshControl
       item.label = "Refresh"
-      item.toolTip = "Refresh (⌘R)"
-      item.isBordered = true
-      item.target = self
-      item.action = #selector(refresh(_:))
     default: return nil
     }
     return item
@@ -237,6 +329,16 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     presence = .closed
   }
 
+  /// The whole toolbar item goes where it can, so no empty capsule stays.
+  private func showTabs(_ shown: Bool) {
+    tabs.isHidden = !shown
+    if #available(macOS 15, *),
+      let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == tabsItem })
+    {
+      item.isHidden = !shown
+    }
+  }
+
   // MARK: Rendering
 
   /// Draws the inbox as of now. Unchanged rows and banners are left alone,
@@ -245,15 +347,17 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     renders += 1
     window?.contentView?.needsLayout = true
     let now = Now(date: now(), timeZone: timeZone, locale: locale)
-    let shown = rows(inbox, now: now)
-    let head = header(inbox, rows: shown, now: now)
+    restoreQueue()
+    let listed = queues(inbox)
+    if !listed.contains(where: { $0.section == queue }), let first = listed.first { queue = first.section }
+    sidebar.show(listed, selected: queue)
+    let shown = rows(inbox, queue: queue, now: now)
+    let head = header(inbox, now: now)
     window?.title = head.title
     window?.subtitle = head.summary
-    if head.busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
-    tabs.isHidden = !inbox.showOwnerTabs
+    refreshControl.busy = head.busy
+    showTabs(inbox.showOwnerTabs)
     tabs.selectedSegment = ownerTabs.firstIndex { $0.0 == inbox.ownerFilter } ?? 0
-    directOnly.isHidden = !inbox.showDirectOnly
-    directOnly.state = inbox.reviewDirectOnly ? .on : .off
 
     // One shared failure before any data is shown once, as a panel.
     let failure = inbox.anyLoaded ? nil : inbox.commonError
@@ -261,13 +365,26 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     banners.isHidden = failure != nil
     if let failure {
       unavailable.show(failure, retrying: retrying(inbox))
-      list.show([])
+      list.show([], queue: queue)
       allClear.isHidden = true
       return
     }
-    banners.show(GhInboxCore.banners(inbox, now: now))
-    list.show(shown)
-    allClear.isHidden = !nothingOpen(inbox)
+    banners.show(GhInboxCore.banners(inbox, queue: queue, now: now))
+    list.show(shown, queue: queue)
+    let loading = listed.first { $0.section == queue }?.status == .loading
+    let message =
+      nothingOpen(inbox)
+      ? "Nothing open for you"
+      : !shown.isEmpty
+        ? nil : loading ? "Loading \(GhInboxCore.sections[queue].name)…" : emptyText(inbox, queue: queue)
+    if allClearText.stringValue != message ?? "" {
+      allClearText.stringValue = message ?? ""
+      // The message's width sets the panel's.
+      allClear.superview?.needsLayout = true
+    }
+    // Loading isn't all clear.
+    allClearMark.isHidden = loading
+    allClear.isHidden = message == nil
   }
 }
 
@@ -291,20 +408,30 @@ final class RootView: NSView {
 
   override var isFlipped: Bool { true }
 
+  /// Painted up under the transparent title bar, in the list's color.
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor.controlBackgroundColor.setFill()
+    dirtyRect.fill()
+  }
+
   override func layout() {
     super.layout()
-    let top = banners.isHidden ? 0 : banners.height(for: bounds.width)
-    banners.frame = NSRect(x: 0, y: 0, width: bounds.width, height: top)
+    // Content runs under the title bar; everything starts below it.
+    let titleBar = safeAreaInsets.top
+    let top = titleBar + (banners.isHidden ? 0 : banners.height(for: bounds.width))
+    banners.frame = NSRect(x: 0, y: titleBar, width: bounds.width, height: top - titleBar)
+    // Rows stop at the title bar: a transparent one draws no effect over
+    // rows scrolled beneath it. `draw` paints it the list's color instead.
     list.frame = NSRect(x: 0, y: top, width: bounds.width, height: bounds.height - top)
     // The error panel sits over the emptied list, so it shares its background.
     unavailable.frame = list.frame
-    // Just under the rows, which are only headings when it shows.
-    let rows = (list.documentView as? NSTableView)?.numberOfRows ?? 0
+    // Just under the rows, if any.
+    let table = list.documentView as? NSTableView
+    let rowsEnd = table.map { $0.numberOfRows > 0 ? $0.rect(ofRow: $0.numberOfRows - 1).maxY : 0 } ?? 0
     let size = allClear.fittingSize
     allClear.frame = NSRect(
-      x: ((bounds.width - size.width) / 2).rounded(),
-      y: top + CGFloat(rows) * Metrics.rowHeight + Metrics.allClearGap, width: size.width, height: size.height
-    )
+      x: ((bounds.width - size.width) / 2).rounded(), y: top + rowsEnd + Metrics.allClearGap,
+      width: size.width, height: size.height)
   }
 }
 
@@ -403,10 +530,14 @@ final class Banner: NSView {
 
   override func layout() {
     super.layout()
-    // Its top on the first line's, as text and icon read together.
+    // Centered on the first line, however many lines follow.
+    let line = field.font.map { NSLayoutManager().defaultLineHeight(for: $0) } ?? icon.naturalSize.height
+    let size = icon.naturalSize
+    let y = Metrics.bannerPadding.top + (line - size.height) / 2
+    let scale = window?.backingScaleFactor ?? 2
     icon.frame = icon.frame(
       forAlignmentRect: NSRect(
-        origin: NSPoint(x: Metrics.bannerPadding.left, y: Metrics.bannerPadding.top), size: icon.naturalSize))
+        origin: NSPoint(x: Metrics.bannerPadding.left, y: (y * scale).rounded() / scale), size: size))
     field.frame = field.frame(forAlignmentRect: textRect(for: bounds.width))
     toolTipOwner.attach(to: self)
   }
@@ -486,5 +617,54 @@ final class UnavailableView: NSView {
     hint.isHidden = failure.hint == nil
     // A hidden hint leaves the stack, and its spacing with it.
     stack.setCustomSpacing(failure.hint == nil ? 18 : 10, after: error)
+  }
+}
+
+/// The refresh button, which shows a spinner in its place while a refresh
+/// runs; the same size either way, so the toolbar never shifts.
+final class RefreshControl: NSView {
+  private let button: NSButton
+  private let spinner = NSProgressIndicator()
+  private let icon = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")
+
+  init(target: AnyObject, action: Selector) {
+    button = NSButton(image: icon ?? NSImage(), target: target, action: action)
+    super.init(frame: .zero)
+    button.bezelStyle = .toolbar
+    button.toolTip = "Refresh (⌘R)"
+    button.setAccessibilityLabel("Refresh")
+    spinner.style = .spinning
+    spinner.controlSize = .small
+    spinner.isDisplayedWhenStopped = false
+    addSubview(button)
+    addSubview(spinner)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError() }
+
+  var busy = false {
+    didSet {
+      guard busy != oldValue else { return }
+      button.image = busy ? nil : icon
+      button.setAccessibilityLabel(busy ? "Refreshing" : "Refresh")
+      if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+    }
+  }
+
+  override var intrinsicContentSize: NSSize {
+    let image = icon ?? NSImage()
+    let probe = NSButton(image: image, target: nil, action: nil)
+    probe.bezelStyle = .toolbar
+    return probe.fittingSize
+  }
+
+  override func layout() {
+    super.layout()
+    button.frame = bounds
+    let size = spinner.fittingSize
+    spinner.frame = NSRect(
+      x: ((bounds.width - size.width) / 2).rounded(), y: ((bounds.height - size.height) / 2).rounded(),
+      width: size.width, height: size.height)
   }
 }

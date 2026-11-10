@@ -7,30 +7,45 @@ import Foundation
 public struct SectionSpec: Sendable {
   let alias: String
   public let name: String
+  /// The sidebar heading the queue sits under.
+  public let group: String
+  /// What an empty queue says.
+  public let empty: String
   let scope: String
   /// Who the section is about.
   let qualifier: String
   var ranking = Ranking.attention
+  var routing = Routing.notAsked
 }
 
-/// Display order.
+/// Display order, which is also priority: an item shows in the first queue
+/// that has it.
 public let sections: [SectionSpec] = [
+  // GitHub matches `user-review-requested` only against the viewer by name.
   SectionSpec(
-    alias: "review", name: "Awaiting my review", scope: "is:open is:pr archived:false",
-    qualifier: "review-requested:@me"),
+    alias: "direct", name: "Asked of me", group: "Review", empty: "No one has asked you by name.",
+    scope: "is:open is:pr", qualifier: "user-review-requested:@me", routing: .allDirect),
+  // script/check-review-split found it disjoint from the queue above and,
+  // with it, equal to `review-requested:@me` on a busy work account. If it
+  // ever misbehaves, plain `review-requested:@me` works too: a PR also
+  // asked by name shows only in the queue above.
   SectionSpec(
-    alias: "authored", name: "My open PRs", scope: "is:open is:pr archived:false", qualifier: "author:@me",
-    ranking: .merge),
+    alias: "team", name: "Via my teams", group: "Review", empty: "Nothing waiting on your teams.",
+    scope: "is:open is:pr", qualifier: "review-requested:@me -user-review-requested:@me",
+    routing: .fromRequests),
   SectionSpec(
-    alias: "assigned", name: "Assigned to me", scope: "is:open archived:false", qualifier: "assignee:@me"),
+    alias: "authored", name: "My open PRs", group: "Mine", empty: "You have no open PRs.",
+    scope: "is:open is:pr", qualifier: "author:@me", ranking: .merge),
   SectionSpec(
-    alias: "personal", name: "Also in my repos", scope: "is:open archived:false", qualifier: "user:@me"),
+    alias: "assigned", name: "Assigned to me", group: "Mine", empty: "Nothing is assigned to you.",
+    scope: "is:open", qualifier: "assignee:@me"),
+  SectionSpec(
+    alias: "personal", name: "Also in my repos", group: "Mine", empty: "Nothing else is open in your repos.",
+    scope: "is:open", qualifier: "user:@me"),
 ]
 
-public let reviewSection = 0
-
-/// Never matches a request that reached the viewer through a team.
-let directReviewQualifier = "user-review-requested:@me"
+/// Requests through teams, hidden when the account can't be on one.
+public let teamSection = 1
 
 /// Makes the first page the newest activity.
 let order = "sort:updated-desc"
@@ -38,27 +53,33 @@ let order = "sort:updated-desc"
 /// Token scopes that let `organizations` include private memberships.
 let orgScopes = ["read:org", "write:org", "admin:org"]
 
-/// The search a section runs; `directOnly` narrows only the review section.
-public func search(_ section: Int, directOnly: Bool) -> String {
+/// Leaves out archived repositories. The API takes it; GitHub's web search
+/// rejects it, so the web link goes without.
+let notArchived = "archived:false"
+
+/// The search a section runs.
+public func search(_ section: Int) -> String {
   let spec = sections[section]
-  let qualifier = section == reviewSection && directOnly ? directReviewQualifier : spec.qualifier
-  return "\(spec.scope) \(qualifier) \(order)"
+  return "\(spec.scope) \(notArchived) \(spec.qualifier) \(order)"
 }
 
-/// The same search on GitHub, for everything a section can't show.
-public func searchURL(_ section: Int, host: String, directOnly: Bool) -> String {
-  "https://\(host)/search?type=issues&q=\(encode(search(section, directOnly: directOnly)))"
+/// The same search on GitHub, for everything a section can't show; it may
+/// also list items in archived repositories. The web search keeps PRs
+/// apart from issues and rejects `is:pr` among issues, so a PR queue opens
+/// as a pull-request search.
+public func searchURL(_ section: Int, host: String) -> String {
+  let spec = sections[section]
+  let terms = spec.scope.split(separator: " ")
+  let pullRequests = terms.contains("is:pr")
+  let scope = terms.filter { $0 != "is:pr" }.joined(separator: " ")
+  let type = pullRequests ? "pullrequests" : "issues"
+  return "https://\(host)/search?type=\(type)&q=\(encode("\(scope) \(spec.qualifier) \(order)"))"
 }
 
 /// What a section's search says about how each PR's review request reached
 /// the viewer.
-enum Routing {
+enum Routing: Sendable {
   case notAsked, allDirect, fromRequests
-
-  static func of(_ section: Int, directOnly: Bool) -> Routing {
-    guard section == reviewSection else { return .notAsked }
-    return directOnly ? .allDirect : .fromRequests
-  }
 }
 
 /// Identity plus one section's newest `size` matches. Every request names
@@ -93,11 +114,10 @@ func checksQuery(_ ids: [String]) -> String {
 
 extension GitHub {
   /// The newest `size` (at most 100) matches for `sections[section]`.
-  func section(_ section: Int, size: Int, directOnly: Bool, as credential: Credential) async -> SectionFetch {
+  func section(_ section: Int, size: Int, as credential: Credential) async -> SectionFetch {
     let alias = sections[section].alias
-    let routing = Routing.of(section, directOnly: directOnly)
-    let query = sectionQuery(
-      alias: alias, search: search(section, directOnly: directOnly), size: size, routing: routing)
+    let routing = sections[section].routing
+    let query = sectionQuery(alias: alias, search: search(section), size: size, routing: routing)
     switch await graphql(query, as: credential) {
     case .success(let reply): return parseSection(alias: alias, routing: routing, reply: reply)
     case .failure(let error): return SectionFetch(identity: nil, page: .failure(error), warnings: [])

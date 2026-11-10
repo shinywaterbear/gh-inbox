@@ -33,8 +33,15 @@ For a quick look without installing, `swift run` starts it from the checkout.
 
 ## Using it
 
-- Sections: awaiting your review, your open PRs, assigned to you, and what's
-  left in repos you own. An item shows once, in the first section that has it.
+- The sidebar lists five queues: review requests asked of you by name,
+  those that came through your teams, your open PRs, what's assigned to
+  you, and what's left in repos you own. An item shows once, in the first
+  queue that has it. `cmd-1` to `cmd-5` pick a queue; Tab, or the left and
+  right arrows, move between the sidebar and the list.
+- A long queue ends in "Load 25 more" and "Open on GitHub"; `cmd-l` and
+  `shift-cmd-o` do the same from the keyboard.
+- Your open PRs are grouped: approved, changes requested, awaiting review,
+  then drafts.
 - Click a row to open it in the browser, or select it with the arrow keys
   and press Return; `cmd-c` copies its link. Right-click a row to copy its
   link or `owner/repo#123` without opening it. `cmd-r` refreshes.
@@ -42,10 +49,8 @@ For a quick look without installing, `swift run` starts it from the checkout.
   background.
 - Closing the window keeps gh-inbox in the Dock without fetching anything;
   click the Dock icon or press `cmd-0` to bring it back, `cmd-q` to quit.
-- The View menu mirrors the toolbar: `cmd-1`/`2`/`3` pick All, Personal or
-  Org, and `shift-cmd-d` toggles "Direct only".
-- "Direct only" hides review requests that reached you through a team. The
-  All/Personal/Org tabs appear once both kinds of repository show up.
+- The All/Personal/Org tabs appear once both kinds of repository show up;
+  `opt-cmd-1`/`2`/`3` pick one.
 
 ## Development
 

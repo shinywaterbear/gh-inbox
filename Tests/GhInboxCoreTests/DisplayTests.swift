@@ -10,7 +10,8 @@ private func loaded(_ answers: [SectionFetch]) -> Inbox {
   inbox.refresh()
   while let ticket = inbox.nextJob() {
     switch ticket.job {
-    case .section(let index, _, _): inbox.finish(ticket, .section(answers[index]), now: .now)
+    case .section(let index, _):
+      inbox.finish(ticket, .section(answers.indices.contains(index) ? answers[index] : ok([])), now: .now)
     case .checks(let ids):
       inbox.finish(
         ticket, .checks(ChecksFetch(identity: identity, results: ids.map { ($0, .failure(.server("502"))) })),
@@ -30,28 +31,112 @@ private func at(_ instant: Instant = .now, _ date: Date = noon) -> Now {
     instant: instant, date: date, timeZone: TimeZone(identifier: "UTC")!, locale: Locale(identifier: "en_US"))
 }
 
+extension SectionFetch {
+  /// The same fetch, failed.
+  var failing: SectionFetch {
+    var fetch = self
+    fetch.page = .failure(.server("502"))
+    return fetch
+  }
+}
+
 private func notices(_ rows: [RowModel]) -> [Notice] {
   rows.compactMap { if case .notice(let notice) = $0.content { notice } else { nil } }
 }
 
 struct DisplayTests {
   @Test func rowsListHeadingsItemsAndOneRowForACutOffSection() {
-    let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([issue("b")]), ok([])])
+    let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([issue("b")]), ok([]), ok([])])
     let shown = rows(inbox, now: at())
     #expect(
       shown.map(\.id).prefix(3) == [.heading(section: 0), .item(section: 0, url: "a"), .cutOff(section: 0)])
     #expect(
       shown.first?.content
-        == .heading(HeadingRow(name: "Awaiting my review", mark: .count(1, dim: false), ruled: false)))
+        == .heading(HeadingRow(name: "Asked of me", mark: .count(1, dim: false), ruled: false)))
     #expect(
       shown[2].content
         == .cutOff(
           CutOffRow(
             section: 0, more: .button("Load 25 more"), note: "Showing the newest 1 of 60 matches",
-            url: searchURL(0, host: "github.com", directOnly: false))))
+            url: searchURL(0, host: "github.com"))))
     #expect(
-      shown[3].content == .heading(HeadingRow(name: "My open PRs", mark: .count(0, dim: true), ruled: true)))
+      shown[3].content == .heading(HeadingRow(name: "Via my teams", mark: .count(0, dim: true), ruled: true)))
     #expect(shown.compactMap { if case .item(let item) = $0.content { item.owner } else { nil } }.isEmpty)
+  }
+
+  /// GitHub may also match a PR asked by name in the team search; it shows
+  /// once, in Asked of me, and the team queue says where it went.
+  @Test func aPrAskedBothWaysShowsOnlyInAskedOfMe() {
+    let both = pr("both", "h")
+    let inbox = loaded([ok([both]), ok([both, pr("team", "h")]), ok([]), ok([]), ok([])])
+    #expect(rows(inbox, queue: 0, now: at()).map(\.id) == [.item(section: 0, url: "both")])
+    let team = rows(inbox, queue: teamSection, now: at())
+    #expect(team.prefix(1).map(\.id) == [.item(section: teamSection, url: "team")])
+    guard case .cutOff(let cut) = team.last?.content else {
+      Issue.record("no closing row")
+      return
+    }
+    #expect(cut.note == "1 shown of 2 matches; 1 in other queues")
+    #expect(cut.more == .none)
+    #expect(queues(inbox).map(\.count) == [1, 2, 0, 0, 0], "the sidebar counts GitHub's totals")
+  }
+
+  @Test func myOpenPrsShowTheirGroupsWithoutRepeatingThemOnRows() {
+    func mine(_ url: String, _ review: Review?, draft: Bool = false) -> Item {
+      var item = pr(url, "h")
+      item.review = review
+      item.isDraft = draft
+      return item
+    }
+    let prs = [
+      mine("a", .approved), mine("c", .changesRequested), mine("w", .required), mine("w2", nil),
+      mine("d", nil, draft: true),
+    ]
+    let inbox = loaded([ok([]), ok([]), ok(prs), ok([]), ok([])])
+    let shown = rows(inbox, queue: 2, now: at())
+    let headings = shown.compactMap { row -> String? in
+      if case .heading(let h) = row.content, case .count(let n, _) = h.mark { "\(h.name) \(n)" } else { nil }
+    }
+    #expect(headings == ["Approved 1", "Changes requested 1", "Awaiting review 2", "Drafts 1"])
+    #expect(shown.allSatisfy { if case .item(let item) = $0.content { !item.showsBadge } else { true } })
+    let elsewhere = rows(loaded([ok(prs)]), queue: 0, now: at())
+    #expect(elsewhere.allSatisfy { if case .item(let item) = $0.content { item.showsBadge } else { true } })
+  }
+
+  @Test func theSidebarSaysWhatEachQueueIsDoing() {
+    var inbox = Inbox()
+    inbox.refresh()
+    var tickets: [Ticket] = []
+    while let ticket = inbox.nextJob() { tickets.append(ticket) }
+    #expect(queues(inbox).prefix(4).map(\.status) == [.loading, .loading, .loading, .loading])
+    inbox.finish(tickets[0], .section(ok([issue("x")])), now: .now)
+    inbox.finish(tickets[1], .section(ok([]).failing), now: .now)
+    #expect(queues(inbox).prefix(2).map(\.status) == [.ready, .failed])
+    #expect(emptyText(inbox, queue: 1) == nil, "a failure isn't emptiness")
+    inbox.refresh()
+    while let ticket = inbox.nextJob() {
+      if case .section(0, _) = ticket.job { inbox.finish(ticket, .section(ok([]).failing), now: .now) }
+    }
+    #expect(queues(inbox)[0].status == .stale, "the earlier rows stay")
+    #expect(queues(inbox)[0].count == 1)
+  }
+
+  @Test func aQueuesFailureIsABannerNotARow() {
+    var inbox = loaded([ok([issue("x")]), ok([]), ok([]), ok([]), ok([])])
+    inbox.refresh()
+    while let ticket = inbox.nextJob() {
+      let fetch = ticket.job == .section(index: 0, size: pageStep) ? ok([]).failing : ok([])
+      inbox.finish(ticket, .section(fetch), now: .now)
+    }
+    #expect(rows(inbox, queue: 0, now: at()).map(\.id) == [.item(section: 0, url: "x")])
+    #expect(banners(inbox, queue: 0, now: at()).map(\.tone) == [.error])
+    #expect(banners(inbox, queue: 2, now: at()).isEmpty, "only the queue shown")
+  }
+
+  @Test func anEmptyQueueSaysSoAndALoadedEmptyOneIsZero() {
+    let inbox = loaded([ok([]), ok([]), ok([]), ok([]), ok([])])
+    #expect(emptyText(inbox, queue: 0) == "No one has asked you by name.")
+    #expect(queues(inbox)[0].count == 0)
   }
 
   @Test func anItemRowCarriesEverythingItShows() {
@@ -79,7 +164,7 @@ struct DisplayTests {
   }
 
   @Test func aTickRewordsOnlyTheRowsWhoseTextMoved() {
-    var failing = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([])])
+    var failing = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([]), ok([])])
     let then = ContinuousClock.now
     failing.sections[0].error = .server("502")
     failing.sections[0].fetchedAt = then
@@ -93,8 +178,8 @@ struct DisplayTests {
   }
 
   @Test func rowChangesKeepRowsWhoseIdentityStays() {
-    let first = loaded([ok([pr("a", "h"), pr("b", "h")]), ok([]), ok([]), ok([])])
-    let second = loaded([ok([pr("b", "h"), pr("c", "h")]), ok([]), ok([]), ok([])])
+    let first = loaded([ok([pr("a", "h"), pr("b", "h")]), ok([]), ok([]), ok([]), ok([])])
+    let second = loaded([ok([pr("b", "h"), pr("c", "h")]), ok([]), ok([]), ok([]), ok([])])
     let old = rows(first, now: at())
     let new = rows(second, now: at())
     let diff = changes(from: old, to: new)
@@ -105,7 +190,7 @@ struct DisplayTests {
   }
 
   @Test func arrowKeysSkipRowsThatDoNothing() {
-    let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([issue("b")]), ok([])])
+    let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([issue("b")]), ok([]), ok([])])
     let shown = rows(inbox, now: at())
     let items = shown.indices.filter { shown[$0].action != nil }
     #expect(items.count == 2)
@@ -119,13 +204,13 @@ struct DisplayTests {
   }
 
   @Test func copyTakesAnItemsLinkAndNothingFromRowsThatDoNothing() {
-    let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([]), ok([])])
+    let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([]), ok([]), ok([])])
     let copied = rows(inbox, now: at()).map(\.copyText)
     #expect(copied.compactMap { $0 } == ["a"])
   }
 
   @Test func rightClickOffersAnItemsLinkAndReferenceAndNothingOnRowsThatDoNothing() {
-    let inbox = loaded([truncated([pr("https://x/1", "h")], 60), ok([]), ok([]), ok([])])
+    let inbox = loaded([truncated([pr("https://x/1", "h")], 60), ok([]), ok([]), ok([]), ok([])])
     let menus = rows(inbox, now: at()).map(\.menu).filter { !$0.isEmpty }
     #expect(
       menus == [
@@ -138,23 +223,23 @@ struct DisplayTests {
   }
 
   @Test func aCutOffNoteNamesTheShownCountOnlyWhenItDiffers() {
-    var inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([]), ok([])])
+    var inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([]), ok([]), ok([])])
     // The fixture's repository has no owner type, so the Personal tab drops it.
     inbox.ownerFilter = .personal
     let notes = rows(inbox, now: at()).compactMap { row -> String? in
       if case .cutOff(let cut) = row.content { cut.note } else { nil }
     }
-    #expect(notes == ["0 shown of the newest 1 of 60 matches, before the Personal/Org filter"])
+    #expect(notes == ["0 shown of the newest 1 of 60 matches; 1 hidden by the Personal/Org filter"])
   }
 
   @Test func nothingOpenNeedsEverySectionEmptyAndWhole() {
-    #expect(nothingOpen(loaded([ok([]), ok([]), ok([]), ok([])])))
+    #expect(nothingOpen(loaded([ok([]), ok([]), ok([]), ok([]), ok([])])))
     var withheld = ok([])
     withheld.warnings = [.withheld(3)]
     #expect(!nothingOpen(loaded([ok([]), ok([]), withheld, ok([])])))
     #expect(!nothingOpen(loaded([ok([]), ok([]), ok([]), truncated([], 300)])))
     // Items count before the owner tabs filter them out.
-    var inbox = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([])])
+    var inbox = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([]), ok([])])
     inbox.ownerFilter = .personal
     #expect(!nothingOpen(inbox))
   }
@@ -175,7 +260,7 @@ struct DisplayTests {
   }
 
   @Test func thePinnedHeadingIsTheNearestAboveTheFirstVisibleRow() {
-    let inbox = loaded([ok([pr("a", "h"), pr("b", "h")]), ok([pr("c", "h")]), ok([]), ok([])])
+    let inbox = loaded([ok([pr("a", "h"), pr("b", "h")]), ok([pr("c", "h")]), ok([]), ok([]), ok([])])
     let shown = rows(inbox, now: at())
     #expect(pinnedHeading(shown, firstVisible: 0) == 0)
     #expect(pinnedHeading(shown, firstVisible: 2) == 0)
@@ -189,7 +274,7 @@ struct DisplayTests {
     #expect(!retrying(inbox))
     inbox.refresh()
     #expect(retrying(inbox))
-    var answered = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([])])
+    var answered = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([]), ok([])])
     #expect(!retrying(answered))
     answered.sections[1].busy = true
     #expect(retrying(answered))
@@ -198,15 +283,15 @@ struct DisplayTests {
   @Test func headerCountsWhatIsDisplayed() {
     var draft = pr("d", "h")
     draft.isDraft = true
-    let inbox = loaded([ok([pr("a", "h"), draft]), ok([]), ok([issue("b")]), ok([])])
-    let head = header(inbox, rows: rows(inbox, now: at()), now: at())
+    let inbox = loaded([ok([pr("a", "h"), draft]), ok([]), ok([issue("b")]), ok([]), ok([])])
+    let head = header(inbox, now: at())
     #expect(head.title == "Open for me")
     #expect(head.summary == "2 PRs (1 draft) · 1 issue · updated just now")
     #expect(!head.busy)
   }
 
   @Test func bannersNameTheSharedFailureAndFailedChecks() {
-    let inbox = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([])])
+    let inbox = loaded([ok([pr("a", "h")]), ok([]), ok([]), ok([]), ok([])])
     let shown = banners(inbox, now: at())
     #expect(shown.count == 1)
     #expect(

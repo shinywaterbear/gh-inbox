@@ -1,15 +1,11 @@
 import AppKit
 import GhInboxCore
 
-/// A list cell drawn from one `RowModel`, laid out by hand: rows are one
-/// line and fixed height, so each cell places its parts in `layout()`.
+/// A list cell drawn from one `RowModel`, laid out by hand: each row kind
+/// has a fixed height, so each cell places its parts in `layout()`.
 /// Cells are reused; `configure` changes only what the model changed.
 @MainActor
 class RowCell: NSTableCellView {
-  /// The repository column's width, which follows the window's.
-  var repoColumn = Metrics.repoWidth.nameOnly {
-    didSet { if repoColumn != oldValue { needsLayout = true } }
-  }
   /// The age column's width, which fits the widest age in the list.
   var ageColumn = Metrics.ageWidth {
     didSet { if ageColumn != oldValue { needsLayout = true } }
@@ -201,17 +197,18 @@ final class CutOffCell: RowCell {
   }
 }
 
-/// One item: check symbol, kind icon, repository, title with its state
-/// and review route, author and age.
+/// One item, on two lines: the check symbol, kind icon, title with its
+/// state and age; under the title, the repository and number, the author
+/// and the review route.
 final class ItemCell: RowCell {
   private let check = CheckMark()
   private let kindIcon = NSImageView()
-  private let repo = NSTextField(labelWithString: "")
   private let title = label(size: 13)
   private let pill = Pill()
-  private let route = label(size: 12, color: .secondaryLabelColor)
-  private let author = label(size: 12, color: .secondaryLabelColor)
   private let age = label(size: 12, color: .secondaryLabelColor)
+  private let repo = NSTextField(labelWithString: "")
+  private let author = label(size: 12, color: .secondaryLabelColor)
+  private let route = label(size: 12, color: .secondaryLabelColor)
   private var shown: ItemRow?
 
   override init(frame: NSRect) {
@@ -221,7 +218,7 @@ final class ItemCell: RowCell {
     repo.cell?.wraps = false
     age.font = Metrics.ageFont
     age.alignment = .right
-    for view in [check, kindIcon, repo, title, pill, route, author, age] { addSubview(view) }
+    for view in [check, kindIcon, title, pill, age, repo, author, route] { addSubview(view) }
   }
 
   override func configure(_ row: RowModel, onLoadMore: @escaping (Int) -> Void) {
@@ -230,21 +227,21 @@ final class ItemCell: RowCell {
     shown = item
     setAccessibilityLabel(item.accessibilityLabel)
     check.show(item.dot)
-    if old?.kind != item.kind {
+    if old?.kind != item.kind || old?.showsBadge != item.showsBadge {
       kindIcon.image = symbolImage(
         item.kind == .issue ? "smallcircle.filled.circle" : "arrow.triangle.pull", size: 13)
       // Everything listed is open; the check and the pill carry the color.
       kindIcon.contentTintColor = item.kind == .draft ? .tertiaryLabelColor : .secondaryLabelColor
       title.textColor = item.kind == .draft ? .secondaryLabelColor : .labelColor
-      pill.show(item.kind.badge, color: item.kind.badgeColor)
+      pill.show(item.showsBadge ? item.kind.badge : nil, color: item.kind.badgeColor)
     }
     if old?.owner != item.owner || old?.repo != item.repo || old?.number != item.number {
       repo.attributedStringValue = repoText(item)
     }
     title.show(item.title)
-    route.show(item.route ?? "")
-    author.show(item.author)
     age.show(item.age)
+    author.show(item.author.isEmpty ? "" : "· \(item.author)")
+    route.show(item.route.map { "· \($0)" } ?? "")
     needsLayout = true
   }
 
@@ -270,27 +267,41 @@ final class ItemCell: RowCell {
 
   override func layout() {
     super.layout()
-    place(check, x: Metrics.inset, width: Metrics.checkWidth)
-    place(kindIcon, x: Metrics.inset + Metrics.checkWidth + Metrics.iconGap, width: Metrics.kindWidth)
-    let repoX = Metrics.inset + Metrics.leadWidth + Metrics.columnGap
-    place(repo, x: repoX, width: repoColumn)
-
+    let top = bounds.height / 2 - Metrics.itemLineOffset
+    let bottom = bounds.height / 2 + Metrics.itemLineOffset
+    place(check, x: Metrics.inset, width: Metrics.checkWidth, centerY: top)
+    place(
+      kindIcon, x: Metrics.inset + Metrics.checkWidth + Metrics.iconGap, width: Metrics.kindWidth,
+      centerY: top)
+    let textX = Metrics.inset + Metrics.leadWidth + Metrics.columnGap
     let ageX = bounds.width - Metrics.inset - ageColumn
-    place(age, x: ageX, width: ageColumn)
-    let authorX = ageX - Metrics.columnGap - Metrics.authorWidth
-    place(author, x: authorX, width: Metrics.authorWidth)
+    place(age, x: ageX, width: ageColumn, centerY: top)
 
-    // The title takes what the fixed columns leave. The pill always shows;
-    // the route shows whole or not at all, and gives way before the title.
-    let titleX = repoX + repoColumn + Metrics.afterRepo
-    let room = authorX - Metrics.columnGap - titleX
-    let titleWidth = title.naturalSize.width
+    // The title gives way; the pill always shows.
+    let titleRoom = ageX - Metrics.columnGap - textX
     let pillWidth = pill.isHidden ? 0 : Metrics.titleGap + pill.naturalSize.width
-    let routeWidth = route.stringValue.isEmpty ? 0 : Metrics.titleGap + route.naturalSize.width
-    route.isHidden = route.stringValue.isEmpty || titleWidth + pillWidth + routeWidth > room
-    var x = place(title, x: titleX, width: min(titleWidth, room - pillWidth)).maxX
-    if !pill.isHidden { x = place(pill, x: x + Metrics.titleGap).maxX }
-    if !route.isHidden { place(route, x: x + Metrics.titleGap) }
+    let titleEnd = place(
+      title, x: textX, width: min(title.naturalSize.width, titleRoom - pillWidth), centerY: top
+    ).maxX
+    if !pill.isHidden { place(pill, x: titleEnd + Metrics.titleGap, centerY: top) }
+
+    // The repository and number always show, shortened in the middle; the
+    // route, then the author, drop out whole rather than squeeze it.
+    let metaRoom = bounds.width - Metrics.inset - textX
+    func width(_ field: NSTextField) -> CGFloat {
+      field.stringValue.isEmpty ? 0 : Metrics.metaGap + field.naturalSize.width
+    }
+    let repoWidth = repo.naturalSize.width
+    var (authorWidth, routeWidth) = (width(author), width(route))
+    if repoWidth + authorWidth + routeWidth > metaRoom { routeWidth = 0 }
+    if repoWidth + authorWidth > metaRoom { authorWidth = 0 }
+    author.isHidden = authorWidth == 0
+    route.isHidden = routeWidth == 0
+    var x = place(
+      repo, x: textX, width: min(repoWidth, metaRoom - authorWidth - routeWidth), centerY: bottom
+    ).maxX
+    if !author.isHidden { x = place(author, x: x + Metrics.metaGap, centerY: bottom).maxX }
+    if !route.isHidden { place(route, x: x + Metrics.metaGap, centerY: bottom) }
   }
 }
 

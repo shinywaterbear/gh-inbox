@@ -77,7 +77,7 @@ private func drain(
   while let ticket = inbox.nextJob() {
     let outcome: Outcome?
     switch ticket.job {
-    case .section(let index, _, _):
+    case .section(let index, _):
       outcome = answers.indices.contains(index) ? answers[index].map { .section($0) } : nil
       if answers.indices.contains(index) { answers[index] = nil }
     case .checks(let ids): outcome = checks(ids)
@@ -100,7 +100,7 @@ private func refreshWith(_ inbox: inout Inbox, _ answers: [SectionFetch], at tim
 }
 
 private func four(_ a: SectionFetch, _ b: SectionFetch) -> [SectionFetch] {
-  [a, b, ok([]), ok([])]
+  [a, b, ok([]), ok([]), ok([])]
 }
 
 /// Answers the queued review fetch, and any check lookups it starts.
@@ -176,7 +176,7 @@ private func refreshOneByOne(_ inbox: inout Inbox, _ answers: [SectionFetch], _ 
   var tickets = jobs(&inbox).filter { if case .section = $0.job { true } else { false } }
   var screens = [screen(inbox)]
   for index in order {
-    let at = tickets.firstIndex { if case .section(index, _, _) = $0.job { true } else { false } }!
+    let at = tickets.firstIndex { if case .section(index, _) = $0.job { true } else { false } }!
     let ticket = tickets.remove(at: at)
     inbox.finish(ticket, .section(answers[index]), now: now)
     screens.append(screen(inbox))
@@ -189,7 +189,8 @@ private func withCheck(_ answer: Result<CheckState, GhError>) -> (Inbox, Item) {
   let item = pr("PR_a", "h1")
   var inbox = Inbox()
   inbox.refresh()
-  drain(&inbox, [ok([item])]) { ids in .checks(ChecksFetch(identity: me(), results: ids.map { ($0, answer) }))
+  drain(&inbox, [ok([item]), ok([]), ok([]), ok([]), ok([])]) { ids in
+    .checks(ChecksFetch(identity: me(), results: ids.map { ($0, answer) }))
   }
   return (inbox, item)
 }
@@ -198,11 +199,11 @@ private func withCheck(_ answer: Result<CheckState, GhError>) -> (Inbox, Item) {
 private func refreshWithPending(_ inbox: inout Inbox, _ answers: [SectionFetch]) {
   inbox.refresh()
   while let ticket = inbox.nextJob() {
-    guard case .section(let index, _, _) = ticket.job else {
+    guard case .section(let index, _) = ticket.job else {
       Issue.record("only sections expected")
       return
     }
-    inbox.finish(ticket, .section(answers[index]), now: now)
+    inbox.finish(ticket, .section(answers.indices.contains(index) ? answers[index] : ok([])), now: now)
   }
 }
 
@@ -251,11 +252,11 @@ struct SectionStateTests {
     let waiting = pr("waiting", "h")
     var later = pr("later", "h")
     var inbox = Inbox()
-    refreshWith(&inbox, [ok([]), ok([waiting, later]), ok([]), ok([later])])
+    refreshWith(&inbox, [ok([]), ok([]), ok([waiting, later]), ok([]), ok([later])])
     // My open PRs fails; Also in my repos brings the newer, approved copy.
     later.review = .approved
-    refreshWith(&inbox, [ok([]), ghFailed(), ok([]), ok([later])])
-    #expect(urls(inbox.sections[1]) == ["later", "waiting"])
+    refreshWith(&inbox, [ok([]), ok([]), ghFailed(), ok([]), ok([later])])
+    #expect(urls(inbox.sections[2]) == ["later", "waiting"])
   }
 
   @Test func recoveryClearsErrorsAndNeverLoadedIsNotEmpty() {
@@ -271,10 +272,10 @@ struct SectionStateTests {
   @Test func oneSharedFailureIsReportedOnce() {
     var inbox = Inbox()
     let down = { failed(.network("dial tcp")) }
-    refreshWith(&inbox, [down(), down(), down(), down()])
+    refreshWith(&inbox, [down(), down(), down(), down(), down()])
     #expect(inbox.commonError == .network("dial tcp"))
     #expect(!inbox.anyLoaded)
-    refreshWith(&inbox, [down(), ghFailed(), down(), down()])
+    refreshWith(&inbox, [down(), ghFailed(), down(), down(), down()])
     #expect(inbox.commonError == nil, "different failures are shown apart")
   }
 
@@ -282,7 +283,7 @@ struct SectionStateTests {
     var inbox = Inbox()
     inbox.refresh()
     let left = drain(&inbox, [nil, ok([issue("x")])])
-    #expect(left.count == 3, "review, assigned and personal still running")
+    #expect(left.count == 4, "the other sections still running")
     #expect(inbox.sections[1].loaded && !inbox.sections[0].loaded)
     #expect(inbox.visible()[1] == [0])
     #expect(inbox.anyBusy)
@@ -294,7 +295,7 @@ struct SectionStateTests {
     inbox.refresh()
     let started = jobs(&inbox)
     #expect(started.count == concurrency)
-    #expect(started.allSatisfy { if case .section(_, pageStep, _) = $0.job { true } else { false } })
+    #expect(started.allSatisfy { if case .section(_, pageStep) = $0.job { true } else { false } })
     let v1 = inbox.refresh()
     #expect(v1 == 0, "busy sections are not queued twice")
   }
@@ -346,7 +347,8 @@ struct AccountTests {
   @Test func aCheckLookupFromAnotherAccountAlsoResets() {
     var inbox = Inbox()
     inbox.refresh()
-    let left = drain(&inbox, [ok([pr("PR_a", "h1")])])
+    // The last section frees a slot, so the check lookup starts.
+    let left = drain(&inbox, [ok([pr("PR_a", "h1")]), nil, nil, nil, ok([])])
     let check = left.first { if case .checks = $0.job { true } else { false } }!
     let theirs = Outcome.checks(ChecksFetch(identity: someoneElse(), results: [("PR_a", passing("h1"))]))
     let v4 = inbox.finish(check, theirs, now: now)
@@ -355,23 +357,34 @@ struct AccountTests {
     #expect(inbox.check(pr("PR_a", "h1")) == .loading)
   }
 
-  @Test func directOnlyShowsUnlessMembershipRulesTeamsOut() {
+  @Test func theTeamQueueShowsUnlessMembershipRulesTeamsOut() {
     for (membership, shown) in [(Membership.none, false), (.member, true), (.unknown, true)] {
       var inbox = Inbox()
-      #expect(!inbox.showDirectOnly, "hidden until answered")
+      #expect(inbox.showTeamQueue, "shown until ruled out, so it never appears late")
       inbox.refresh()
       answerMembership(&inbox, membership)
-      #expect(inbox.showDirectOnly == shown, "\(membership)")
+      #expect(inbox.showTeamQueue == shown, "\(membership)")
       inbox.refresh()
       let v5 = jobs(&inbox)
       #expect(!v5.contains { $0.job == .membership }, "once per account")
     }
   }
 
+  @Test func noTeamsHidesTheTeamQueue() {
+    var inbox = Inbox()
+    inbox.refresh()
+    answerMembership(&inbox, .none)
+    #expect(!queues(inbox).contains { $0.section == teamSection })
+    #expect(queues(inbox).count == sections.count - 1)
+  }
+
   @Test func aMembershipAnswerForTheOldAccountIsDropped() {
     var inbox = Inbox()
     inbox.refresh()
     var tickets = jobs(&inbox)
+    inbox.finish(tickets.removeFirst(), .section(ok([])), now: now)
+    // The fifth section takes the freed slot; the next one goes to membership.
+    tickets.append(inbox.nextJob()!)
     inbox.finish(tickets.removeFirst(), .section(ok([])), now: now)
     let membership = inbox.nextJob()!
     #expect(membership.job == .membership)
@@ -381,25 +394,23 @@ struct AccountTests {
     let v6 = inbox.finish(tickets.removeFirst(), .section(theirs), now: now)
     #expect(v6)
     inbox.finish(membership, member(.none), now: now)
-    #expect(!inbox.showDirectOnly)
+    #expect(inbox.showTeamQueue)
     #expect(inbox.membership == .due, "asked again")
   }
 
   @Test func aNewAccountStartsWithDefaultFilters() {
     var inbox = Inbox()
     refreshWith(&inbox, four(ok([]), ok([])))
-    let v7 = inbox.setReviewDirectOnly(true)
-    #expect(v7)
     inbox.ownerFilter = .personal
     inbox.mixedOwners = true
+    inbox.refresh()
     let ticket = inbox.nextJob()!
     var theirs = ok([])
     theirs.identity = someoneElse()
     let v8 = inbox.finish(ticket, .section(theirs), now: now)
     #expect(v8)
-    #expect(!inbox.reviewDirectOnly)
     #expect(inbox.ownerFilter == .all)
-    #expect(!inbox.showOwnerTabs && !inbox.showDirectOnly)
+    #expect(!inbox.showOwnerTabs && inbox.showTeamQueue)
   }
 }
 
@@ -428,7 +439,7 @@ struct PlacementTests {
     // Authored answers first, then review, both with x.
     drain(&inbox, [nil, ok([issue("x")])])
     let review = Ticket(
-      job: .section(index: 0, size: pageStep, directOnly: false), epoch: inbox.epoch, round: inbox.round)
+      job: .section(index: 0, size: pageStep), epoch: inbox.epoch, round: inbox.round)
     inbox.finish(review, .section(ok([issue("x")])), now: now)
     #expect(firstTwo(inbox) == [[0], []])
   }
@@ -464,7 +475,7 @@ struct PlacementTests {
     answers[1] = ghFailed()
     _ = refreshOneByOne(&inbox, answers, [0, 1, 2, 3])
     #expect(rowsAndDots(inbox) == before)
-    #expect(inbox.sections.map { $0.error != nil } == [false, true, false, false])
+    #expect(inbox.sections.map { $0.error != nil } == [false, true, false, false, false])
   }
 
   @Test func aChangedRefreshTouchesOnlyTheChangedRows() {
@@ -525,13 +536,13 @@ struct PlacementTests {
     }
     var inbox = Inbox()
     // Round 1: review has A. Round 2: review fails, assigned has A.
-    refreshWith(&inbox, [ok([pr("x", "A")]), ok([]), ok([]), ok([])])
-    refreshWith(&inbox, [ghFailed(), ok([]), ok([pr("x", "A")]), ok([])])
+    refreshWith(&inbox, [ok([pr("x", "A")]), ok([]), ok([]), ok([]), ok([])])
+    refreshWith(&inbox, [ghFailed(), ok([]), ok([pr("x", "A")]), ok([]), ok([])])
     // Round 3: authored brings B; review shows it in place.
-    refreshWith(&inbox, [ghFailed(), ok([pr("x", "B")]), ghFailed(), ok([])])
+    refreshWith(&inbox, [ghFailed(), ok([pr("x", "B")]), ghFailed(), ok([]), ok([])])
     #expect(shownHeads(inbox) == ["0:B"])
     // Round 4: authored drops x while review and assigned fail.
-    refreshWith(&inbox, [ghFailed(), ok([]), ghFailed(), ok([])])
+    refreshWith(&inbox, [ghFailed(), ok([]), ghFailed(), ok([]), ok([])])
     #expect(shownHeads(inbox) == ["0:B"], "assigned's round-2 copy is older than B")
   }
 }
@@ -547,7 +558,7 @@ struct LoadMoreTests {
     let v11 = inbox.loadMore(1)
     #expect(!v11, "already loading")
     var ticket = inbox.nextJob()!
-    #expect(ticket.job == .section(index: 1, size: 50, directOnly: false))
+    #expect(ticket.job == .section(index: 1, size: 50))
     let v12 = inbox.nextJob()
     #expect(v12 == nil, "only that section")
 
@@ -564,8 +575,8 @@ struct LoadMoreTests {
 
     inbox.refresh()
     let sizes = jobs(&inbox).map(\.job)
-    #expect(sizes.contains(.section(index: 1, size: 50, directOnly: false)))
-    #expect(sizes.contains(.section(index: 0, size: pageStep, directOnly: false)))
+    #expect(sizes.contains(.section(index: 1, size: 50)))
+    #expect(sizes.contains(.section(index: 0, size: pageStep)))
   }
 
   @Test func anExpandedSectionRefreshesADuplicateShownEarlier() {
@@ -599,138 +610,20 @@ struct LoadMoreTests {
     let v16 = inbox.loadMore(0)
     #expect(!v16, "asked once")
     let refresh = inbox.nextJob()!
-    #expect(refresh.job == .section(index: 0, size: pageStep, directOnly: false))
+    #expect(refresh.job == .section(index: 0, size: pageStep))
     inbox.finish(refresh, .section(truncated([issue("a")], 60)), now: now)
     #expect(inbox.sections[0].expanding)
-    let sizes = jobs(&inbox).compactMap { ticket -> Int? in
-      if case .section(0, let size, _) = ticket.job { return size }
-      return nil
+    // The other sections' refreshes free the slots the expansion waits for.
+    var sizes: [Int] = []
+    while let ticket = inbox.nextJob() {
+      if case .section(0, let size) = ticket.job { sizes.append(size) }
+      inbox.finish(ticket, .section(ok([])), now: now)
     }
     #expect(sizes == [2 * pageStep])
   }
 }
 
 struct ReviewModeTests {
-  @Test func directOnlyRequeuesTheReviewSectionAndEveryJobCarriesIt() {
-    var inbox = Inbox()
-    inbox.refresh()
-    for ticket in drain(&inbox, [nil, nil, nil, nil]) {
-      inbox.finish(ticket, .section(ok([])), now: now)
-    }
-    #expect(!inbox.reviewDirectOnly)
-    let v17 = inbox.setReviewDirectOnly(true)
-    #expect(v17)
-    #expect(inbox.reviewDirectOnly)
-    let v18 = inbox.setReviewDirectOnly(true)
-    #expect(!v18, "no change, nothing requeued")
-    let v19 = inbox.nextJob()
-    #expect(v19?.job == .section(index: reviewSection, size: pageStep, directOnly: true))
-  }
-
-  @Test func aReviewFetchStartedBeforeTheToggleIsRefetchedNotShown() {
-    var inbox = Inbox()
-    inbox.refresh()
-    let inFlight = inbox.nextJob()!
-    let v20 = inbox.setReviewDirectOnly(true)
-    #expect(v20)
-    inbox.finish(inFlight, .section(ok([issue("stale")])), now: now)
-    #expect(inbox.sections[reviewSection].items.isEmpty)
-    let retried = jobs(&inbox).map(\.job).first {
-      if case .section(reviewSection, _, _) = $0 { true } else { false }
-    }
-    #expect(retried == .section(index: reviewSection, size: pageStep, directOnly: true))
-  }
-
-  @Test func turningDirectOnlyOnNeverShowsTheTeamRequests() {
-    var inbox = Inbox()
-    refreshWith(&inbox, four(truncated([issue("direct"), issue("team")], 60), ok([])))
-    let v21 = inbox.setReviewDirectOnly(true)
-    #expect(v21)
-    var review = inbox.sections[reviewSection]
-    #expect(review.items.isEmpty && !review.loaded && !review.truncated)
-
-    answerReview(&inbox, ghFailed())
-    review = inbox.sections[reviewSection]
-    #expect(review.items.isEmpty && !review.loaded, "nothing from the other search")
-    #expect(review.total == 0 && review.size == pageStep)
-    #expect(review.error == .gh("x"))
-  }
-
-  @Test func eachReviewModeKeepsItsOwnLastGoodRows() {
-    var inbox = Inbox()
-    refreshWith(&inbox, four(ok([issue("direct"), issue("team")]), ok([])))
-    let v22 = inbox.setReviewDirectOnly(true)
-    #expect(v22)
-    answerReview(&inbox, ok([issue("direct")]))
-
-    let v23 = inbox.setReviewDirectOnly(false)
-    #expect(v23)
-    #expect(urls(inbox.sections[reviewSection]) == ["direct", "team"])
-    answerReview(&inbox, ghFailed())
-    #expect(urls(inbox.sections[reviewSection]) == ["direct", "team"], "a failure keeps this mode's rows")
-    #expect(inbox.sections[reviewSection].error != nil)
-
-    let v24 = inbox.setReviewDirectOnly(true)
-    #expect(v24)
-    #expect(urls(inbox.sections[reviewSection]) == ["direct"])
-    #expect(inbox.sections[reviewSection].error == nil)
-    answerReview(&inbox, ghFailed())
-    #expect(urls(inbox.sections[reviewSection]) == ["direct"])
-    #expect(inbox.sections[reviewSection].error != nil)
-  }
-
-  @Test func aSupersededFailureStaysWithItsOwnMode() {
-    var inbox = Inbox()
-    inbox.refresh()
-    let inFlight = inbox.nextJob()!
-    let v25 = inbox.setReviewDirectOnly(true)
-    #expect(v25)
-    inbox.finish(inFlight, .section(ghFailed()), now: now)
-    #expect(inbox.sections[reviewSection].error == nil)
-
-    drain(&inbox, four(ok([issue("d")]), ok([])), checks: noChecks)
-    #expect(urls(inbox.sections[reviewSection]) == ["d"])
-    #expect(inbox.sections[reviewSection].error == nil)
-
-    let v26 = inbox.setReviewDirectOnly(false)
-    #expect(v26)
-    #expect(inbox.sections[reviewSection].error == .gh("x"))
-  }
-
-  @Test func aRestoredReviewModeDoesNotExpectItsOlderHead() {
-    var inbox = Inbox()
-    inbox.refresh()
-    drain(&inbox, four(ok([pr("x", "A")]), ok([])), checks: checksAt("A"))
-    let v27 = inbox.setReviewDirectOnly(true)
-    #expect(v27)
-    drain(&inbox, [ok([])], checks: checksAt("A"))
-    inbox.refresh()
-    drain(&inbox, four(ok([]), ok([pr("x", "B")])), checks: checksAt("B"))
-
-    // The full search's cached copy of x is still at A; authored's is newer.
-    let before = screen(inbox)
-    let v28 = inbox.setReviewDirectOnly(false)
-    #expect(v28)
-    #expect(firstTwo(inbox) == [[], [0]], "restoring moves nothing")
-    #expect(screen(inbox) == before)
-    drain(&inbox, [ghFailed()], checks: checksAt("B"))
-    #expect(firstTwo(inbox) == [[], [0]])
-    #expect(inbox.check(pr("x", "B")) == .known(checks: .passing, stale: false))
-    #expect(inbox.checkFailures() == nil)
-  }
-
-  @Test func togglingDropsAReviewFetchStillWaitingForASlot() {
-    var inbox = Inbox()
-    inbox.refresh()
-    let v29 = inbox.setReviewDirectOnly(true)
-    #expect(v29)
-    let v30 = inbox.setReviewDirectOnly(false)
-    #expect(v30)
-    let reviewJobs = jobs(&inbox).map(\.job).filter {
-      if case .section(reviewSection, _, _) = $0 { true } else { false }
-    }
-    #expect(reviewJobs == [.section(index: reviewSection, size: pageStep, directOnly: false)])
-  }
 
   @Test func ownerTabsAppearOnceBothOwnerTypesLoadAndStay() {
     let org = { owned(issue("org"), "Organization") }
@@ -742,7 +635,7 @@ struct ReviewModeTests {
     #expect(!inbox.showOwnerTabs, "one owner type")
 
     inbox.ownerFilter = .personal
-    let v31 = inbox.loadMore(reviewSection)
+    let v31 = inbox.loadMore(0)
     #expect(v31)
     let v32 = drain(&inbox, [ok([org(), mine()])], checks: noChecks)
     #expect(v32.isEmpty)
@@ -801,7 +694,7 @@ struct CheckStateTests {
     let prs = (0..<30).map { pr("PR_\($0)", "h") }
     inbox.refresh()
     var batches: [Int] = []
-    drain(&inbox, [ok(prs), ok([issue("i")])]) { ids in
+    drain(&inbox, [ok(prs), ok([issue("i")]), ok([]), ok([]), ok([])]) { ids in
       batches.append(ids.count)
       return nil
     }
@@ -820,7 +713,7 @@ struct CheckStateTests {
   @Test func aPendingRecheckKeepsTheDotAsItWas() {
     var (inbox, item) = withCheck(passing("h1"))
     inbox.refresh()
-    let left = drain(&inbox, [ok([item])])
+    let left = drain(&inbox, [ok([item]), ok([]), ok([]), ok([]), ok([])])
     #expect(!left.isEmpty, "the recheck is still running")
     #expect(inbox.check(item) == .known(checks: .passing, stale: false))
   }
@@ -857,7 +750,7 @@ struct CheckStateTests {
   @Test func aFailedRecheckKeepsTheOldStateMarkedStale() {
     var (inbox, item) = withCheck(passing("h1"))
     inbox.refresh()
-    drain(&inbox, [ok([item])]) { ids in
+    drain(&inbox, [ok([item]), ok([]), ok([]), ok([]), ok([])]) { ids in
       .checks(ChecksFetch(identity: nil, results: ids.map { ($0, .failure(.network("down"))) }))
     }
     #expect(inbox.check(item) == .known(checks: .passing, stale: true))
