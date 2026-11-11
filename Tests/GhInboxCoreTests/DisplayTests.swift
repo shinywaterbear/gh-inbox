@@ -52,7 +52,7 @@ struct DisplayTests {
       shown.map(\.id).prefix(3) == [.heading(section: 0), .item(section: 0, url: "a"), .cutOff(section: 0)])
     #expect(
       shown.first?.content
-        == .heading(HeadingRow(name: "Asked of me", mark: .count(1, dim: false), ruled: false)))
+        == .heading(HeadingRow(name: "Back to me", mark: .count(1, dim: false), ruled: false)))
     #expect(
       shown[2].content
         == .cutOff(
@@ -60,7 +60,7 @@ struct DisplayTests {
             section: 0, more: .button("Load 25 more"), note: "Showing the newest 1 of 60 matches",
             url: searchURL(0, host: "github.com"))))
     #expect(
-      shown[3].content == .heading(HeadingRow(name: "Via my teams", mark: .count(0, dim: true), ruled: true)))
+      shown[3].content == .heading(HeadingRow(name: "Asked of me", mark: .count(0, dim: true), ruled: true)))
     #expect(shown.compactMap { if case .item(let item) = $0.content { item.owner } else { nil } }.isEmpty)
   }
 
@@ -68,8 +68,8 @@ struct DisplayTests {
   /// once, in Asked of me, and the team queue says where it went.
   @Test func aPrAskedBothWaysShowsOnlyInAskedOfMe() {
     let both = pr("both", "h")
-    let inbox = loaded([ok([both]), ok([both, pr("team", "h")]), ok([]), ok([]), ok([])])
-    #expect(rows(inbox, queue: 0, now: at()).map(\.id) == [.item(section: 0, url: "both")])
+    let inbox = loaded([ok([]), ok([both]), ok([both, pr("team", "h")]), ok([]), ok([]), ok([])])
+    #expect(rows(inbox, queue: 1, now: at()).map(\.id) == [.item(section: 1, url: "both")])
     let team = rows(inbox, queue: teamSection, now: at())
     #expect(team.prefix(1).map(\.id) == [.item(section: teamSection, url: "team")])
     guard case .cutOff(let cut) = team.last?.content else {
@@ -78,7 +78,7 @@ struct DisplayTests {
     }
     #expect(cut.note == "1 shown of 2 matches; 1 in other queues")
     #expect(cut.more == .none)
-    #expect(queues(inbox).map(\.count) == [1, 2, 0, 0, 0], "the sidebar counts GitHub's totals")
+    #expect(queues(inbox).map(\.count) == [0, 1, 2, 0, 0, 0], "the sidebar counts GitHub's totals")
   }
 
   @Test func myOpenPrsShowTheirGroupsWithoutRepeatingThemOnRows() {
@@ -92,8 +92,8 @@ struct DisplayTests {
       mine("a", .approved), mine("c", .changesRequested), mine("w", .required), mine("w2", nil),
       mine("d", nil, draft: true),
     ]
-    let inbox = loaded([ok([]), ok([]), ok(prs), ok([]), ok([])])
-    let shown = rows(inbox, queue: 2, now: at())
+    let inbox = loaded([ok([]), ok([]), ok([]), ok(prs), ok([]), ok([])])
+    let shown = rows(inbox, queue: 3, now: at())
     let headings = shown.compactMap { row -> String? in
       if case .heading(let h) = row.content, case .count(let n, _) = h.mark { "\(h.name) \(n)" } else { nil }
     }
@@ -115,7 +115,8 @@ struct DisplayTests {
     #expect(emptyText(inbox, queue: 1) == nil, "a failure isn't emptiness")
     inbox.refresh()
     while let ticket = inbox.nextJob() {
-      if case .section(0, _) = ticket.job { inbox.finish(ticket, .section(ok([]).failing), now: .now) }
+      guard case .section(let index, _) = ticket.job else { continue }
+      inbox.finish(ticket, .section(index == 0 ? ok([]).failing : ok([])), now: .now)
     }
     #expect(queues(inbox)[0].status == .stale, "the earlier rows stay")
     #expect(queues(inbox)[0].count == 1)
@@ -133,9 +134,36 @@ struct DisplayTests {
     #expect(banners(inbox, queue: 2, now: at()).isEmpty, "only the queue shown")
   }
 
+  /// Back to me counts only what came back; what waits on its author is
+  /// neither a row nor a gap to explain.
+  @Test func backToMeCountsOnlyWhatCameBack() {
+    func back(_ items: [Item], waiting: Int, total: Int, truncated: Bool = false) -> SectionFetch {
+      var fetch = ok(items)
+      fetch.page = .success(
+        Page(items: items, total: total, truncated: truncated, returned: min(total, 25), waiting: waiting))
+      return fetch
+    }
+    let some = loaded([back([pr("a", "h")], waiting: 2, total: 3)])
+    #expect(queues(some)[0].count == 1)
+    #expect(rows(some, queue: 0, now: at()).map(\.id) == [.item(section: 0, url: "a")], "no closing row")
+    #expect(emptyText(some, queue: 0) == nil)
+
+    let none = loaded([back([], waiting: 2, total: 2)])
+    #expect(queues(none)[0].count == 0)
+    #expect(rows(none, queue: 0, now: at()).isEmpty)
+    #expect(emptyText(none, queue: 0) == sections[0].empty)
+
+    let long = loaded([back([pr("a", "h")], waiting: 24, total: 40, truncated: true)])
+    guard case .cutOff(let cut) = rows(long, queue: 0, now: at()).last?.content else {
+      Issue.record("no closing row")
+      return
+    }
+    #expect(cut.note == "1 shown of the newest 25 of 40 matches; 24 not pushed since your review")
+  }
+
   @Test func anEmptyQueueSaysSoAndALoadedEmptyOneIsZero() {
-    let inbox = loaded([ok([]), ok([]), ok([]), ok([]), ok([])])
-    #expect(emptyText(inbox, queue: 0) == "No one has asked you by name.")
+    let inbox = loaded([ok([]), ok([]), ok([]), ok([]), ok([]), ok([])])
+    #expect(emptyText(inbox, queue: 1) == "No one has asked you by name.")
     #expect(queues(inbox)[0].count == 0)
   }
 

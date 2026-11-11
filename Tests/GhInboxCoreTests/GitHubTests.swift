@@ -5,8 +5,9 @@ import Testing
 
 /// The queue most decoding tests use: its search also reads review requests.
 private let review = teamSection
-private let direct = 0
-private let authored = 2
+private let back = 0
+private let direct = 1
+private let authored = 3
 
 /// A section that loaded, and its warnings.
 private func page(_ fetch: SectionFetch) throws -> (Page, [GhError]) {
@@ -49,11 +50,13 @@ private func conn(_ nodes: JSON) -> JSON {
 
 /// `review` (the team queue) and `authored` as given; the others empty.
 /// Each section's request reads only its own alias.
-private func response(_ review: JSON, _ authored: JSON, direct: JSON = conn([])) -> JSON {
+private func response(
+  _ review: JSON, _ authored: JSON, direct: JSON = conn([]), back: JSON = conn([])
+) -> JSON {
   [
     "data": [
       "viewer": ["login": "me", "url": "https://github.com/me"],
-      "direct": direct, "team": review, "authored": authored,
+      "back": back, "direct": direct, "team": review, "authored": authored,
       "assigned": conn([]), "personal": conn([]),
     ]
   ]
@@ -77,6 +80,56 @@ private func sentQuery(_ call: (FakeGitHub) async -> Void) async throws -> Strin
   return sent.query
 }
 
+/// `pr(number)` with one reviewer's latest opinion on `commit`.
+private func opined(
+  _ number: Int, _ state: String, by login: String = "me", on commit: String = "old", more: Bool = false
+) -> JSON {
+  var node = pr(number, "2026-11-01T00:00:00Z", decision: "CHANGES_REQUESTED")
+  node["opinions"] = [
+    "pageInfo": ["hasNextPage": .bool(more)],
+    "nodes": [
+      ["state": .string(state), "author": ["login": .string(login)], "commit": ["oid": .string(commit)]]
+    ],
+  ]
+  return node
+}
+
+/// My change request on a commit GitHub no longer has.
+private func gone(_ number: Int) -> JSON {
+  var node = opined(number, "CHANGES_REQUESTED")
+  node["opinions"]["nodes"][0]["commit"] = .null
+  return node
+}
+
+struct BackToMeTests {
+  /// Changes requested, then a push and a re-review asked for in a
+  /// comment, with no review request left to find.
+  @Test func keepsOnlyChangeRequestsPushedSince() async throws {
+    let nodes: JSON = [
+      opined(1, "CHANGES_REQUESTED"),
+      opined(2, "CHANGES_REQUESTED", on: "sha2"),
+      opined(3, "APPROVED"),
+      opined(4, "CHANGES_REQUESTED", by: "someone-else"),
+      opined(5, "CHANGES_REQUESTED", by: "someone-else", more: true),
+      gone(6),
+    ]
+    let json = response(conn([]), conn([]), back: conn(nodes))
+    let (found, warnings) = try await page(responding(json).section(back))
+    #expect(found.items.map(\.number) == [1, 6], "a review commit that is gone isn't the head")
+    #expect(found.items.first?.reviewRoute == .returned)
+    #expect(found.waiting == 3, "pushed nothing since, approved, or never reviewed by me")
+    #expect(warnings == [.unreadable(1)], "a cut-off list may hide my opinion")
+    #expect(found.total == 6 && found.returned == 6)
+  }
+
+  @Test func searchesWhatIReviewedButDidNotWriteOrApprove() {
+    #expect(
+      search(back)
+        == "is:open is:pr archived:false reviewed-by:@me -author:@me -review:approved sort:updated-desc")
+    #expect(sections[back].group == sections[direct].group, "a review queue, ahead of Asked of me")
+  }
+}
+
 struct SectionRequestTests {
   @Test func eachSectionSendsOneSearchOfTheSizeAsked() async throws {
     for (index, spec) in sections.enumerated() {
@@ -87,6 +140,7 @@ struct SectionRequestTests {
       #expect(query.hasSuffix(" sort:updated-desc"), "\(spec.alias)")
       #expect(sent.contains("fragment items on SearchResultItemConnection"))
       #expect(sent.contains("reviewRequests") == (index == teamSection), "only the team queue reads requests")
+      #expect(sent.contains("opinions: latestOpinionatedReviews") == (index == back), "only Back to me")
       #expect(!sent.contains("statusCheckRollup"), "checks load separately")
     }
   }
@@ -390,7 +444,7 @@ struct PartialResultTests {
       #expect(!url.contains("archived") && !url.contains("is%3Apr"), "\(url)")
     }
     #expect(
-      searchURL(4, host: "github.com")
+      searchURL(5, host: "github.com")
         == "https://github.com/search?type=issues&q=is%3Aopen%20user%3A%40me%20sort%3Aupdated-desc")
   }
 

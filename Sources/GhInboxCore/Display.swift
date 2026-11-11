@@ -170,8 +170,8 @@ public struct QueueModel: Sendable, Equatable {
   public var name: String
   /// The sidebar heading it sits under.
   public var group: String
-  /// GitHub's total for the queue's search, before deduplication and the
-  /// owner filter; nil until it has loaded.
+  /// GitHub's total for the queue's search (`SectionView.matched`), before
+  /// deduplication and the owner filter; nil until it has loaded.
   public var count: Int?
   public var status: QueueStatus
 }
@@ -205,7 +205,7 @@ public func queues(_ inbox: Inbox) -> [QueueModel] {
     let section = inbox.sections[s]
     return QueueModel(
       section: s, name: sections[s].name, group: sections[s].group,
-      count: section.loaded ? section.total : nil, status: QueueStatus(section))
+      count: section.loaded ? section.matched : nil, status: QueueStatus(section))
   }
 }
 
@@ -268,7 +268,7 @@ public func rows(_ inbox: Inbox, queue s: Int, now: Now) -> [RowModel] {
     row.showsBadge = !grouped
     result.append(RowModel(id: .item(section: s, url: item.url), content: .item(row)))
   }
-  if section.loaded, section.truncated || shown.count < section.total {
+  if section.loaded, section.truncated || shown.count < section.matched {
     let url = searchURL(s, host: inbox.identity?.host ?? "github.com")
     let more: CutOffRow.More =
       section.expanding ? .loading : section.canLoadMore ? .button("Load \(pageStep) more") : .none
@@ -290,7 +290,8 @@ func shortfall(_ inbox: Inbox, queue s: Int) -> String {
   let elsewhere = section.items.count - unique
   if elsewhere > 0 { reasons.append("\(elsewhere) in other queues") }
   if unique > shown { reasons.append("\(unique - shown) hidden by the Personal/Org filter") }
-  let lost = section.returned - section.items.count
+  let lost = section.returned - section.items.count - section.waiting
+  if section.waiting > 0 { reasons.append("\(section.waiting) not pushed since your review") }
   if lost > 0 { reasons.append("\(lost) unreadable or withheld") }
   if shown == section.returned && section.truncated { return "Showing \(fetched)" }
   return "\(shown) shown of \(fetched)" + (reasons.isEmpty ? "" : "; " + reasons.joined(separator: ", "))
@@ -300,7 +301,9 @@ func shortfall(_ inbox: Inbox, queue s: Int) -> String {
 /// filtered out or held back.
 public func emptyText(_ inbox: Inbox, queue s: Int) -> String? {
   let section = inbox.sections[s]
-  guard section.loaded, section.total == 0, section.warnings.isEmpty, section.error == nil else { return nil }
+  guard section.loaded, section.matched == 0, section.warnings.isEmpty, section.error == nil else {
+    return nil
+  }
   return sections[s].empty
 }
 
@@ -313,7 +316,8 @@ func itemRow(_ item: Item, check: CheckView?, multiOwner: Bool, viewer: String?,
   let place = "\(item.repository.nameWithOwner) #\(item.number)"
   // The route too: a narrow row may have no room to show it.
   let toolTip =
-    "\(item.title)\n\(place) · updated \(updated)" + (route.map { "\nReview request: \($0)" } ?? "")
+    "\(item.title)\n\(place) · updated \(updated)"
+    + (route.map { "\n\(item.reviewRoute == .returned ? "Review" : "Review request"): \($0)" } ?? "")
   let spoken = [
     kind.spokenName, item.title, place, kind.badge, dot.spoken, route, author.isEmpty ? nil : "by \(author)",
     "updated \(updated)",
@@ -592,5 +596,6 @@ public func routeLabel(_ route: ReviewRoute?) -> String? {
   case .team(let team): "via \(team)"
   case .someTeam: "via a team"
   case .unknown: "request source unknown"
+  case .returned: "pushed since your review"
   }
 }

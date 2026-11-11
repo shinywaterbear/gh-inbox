@@ -14,6 +14,8 @@ public enum ReviewRoute: Sendable, Equatable {
   /// One of several requested teams, unknown which.
   case someTeam
   case unknown
+  /// Not a request: the author pushed since the viewer requested changes.
+  case returned
 }
 
 public enum OwnerKind: Sendable, Hashable {
@@ -96,6 +98,8 @@ public struct Page: Sendable {
   /// Results GitHub returned on the page, before dropping unreadable or
   /// withheld ones.
   public var returned: Int
+  /// Results left out as not yet back from their authors (`Routing.returned`).
+  public var waiting = 0
 }
 
 public struct SectionFetch: Sendable {

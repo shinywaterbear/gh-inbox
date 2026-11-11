@@ -123,6 +123,8 @@ public struct SectionView: Sendable {
   public var truncated = false
   /// Results GitHub returned, before decoding losses and deduplication.
   public var returned = 0
+  /// Results the queue's own rule left out (`Page.waiting`).
+  public var waiting = 0
   /// The page size last fetched successfully, which refreshes keep.
   public var size = pageStep
   public var fetchedAt: Instant?
@@ -140,6 +142,9 @@ public struct SectionView: Sendable {
 
   public var canLoadMore: Bool { truncated && size < pageMax }
 
+  /// GitHub's total less what the queue's own rule left out of the page.
+  public var matched: Int { total - waiting }
+
   /// Records the outcome; returns whether new items arrived.
   mutating func apply(size: Int, round: UInt64, fetch: SectionFetch, now: Instant) -> Bool {
     busy = false
@@ -153,6 +158,7 @@ public struct SectionView: Sendable {
       total = page.total
       truncated = page.truncated
       returned = page.returned
+      waiting = page.waiting
       self.size = size
       loaded = true
       error = nil

@@ -82,7 +82,9 @@ func parseSection(alias: String, routing: Routing, reply: Reply) -> SectionFetch
     var items = decoded.items
     rank(&items, by: sections.first { $0.alias == alias }?.ranking ?? .attention)
     page = .success(
-      Page(items: items, total: decoded.total, truncated: decoded.truncated, returned: decoded.returned))
+      Page(
+        items: items, total: decoded.total, truncated: decoded.truncated, returned: decoded.returned,
+        waiting: decoded.waiting))
   case .failure(let problem):
     page = .failure(warnings.isEmpty ? problem : warnings.removeFirst())
   }
@@ -143,6 +145,7 @@ struct Decoded {
   var returned: Int
   var withheld = 0
   var unreadable = 0
+  var waiting = 0
 }
 
 func decodeSection(_ value: JSON, viewer: String, routing: Routing) -> Result<Decoded, GhError> {
@@ -156,6 +159,15 @@ func decodeSection(_ value: JSON, viewer: String, routing: Routing) -> Result<De
     if node.isNull {
       decoded.withheld += 1
     } else if let node = try? node.decode(Node.self) {
+      switch node.sentBack(viewer: viewer, routing: routing) {
+      case true?: break
+      case false?:
+        decoded.waiting += 1
+        continue
+      case nil:
+        decoded.unreadable += 1
+        continue
+      }
       if let item = node.item(viewer: viewer, routing: routing) { decoded.items.append(item) }
     } else {
       decoded.unreadable += 1
@@ -203,6 +215,21 @@ enum Node: Decodable {
     }
   }
 
+  /// For `Routing.returned`, whether the viewer's latest opinion requested
+  /// changes on an older commit than the head; nil when the opinions came
+  /// back incomplete without it. Always true for other routings.
+  func sentBack(viewer: String, routing: Routing) -> Bool? {
+    guard routing == .returned else { return true }
+    guard case .pullRequest(let pr) = self, let opinions = pr.opinions else { return nil }
+    let nodes = opinions.nodes.compactMap { $0 }
+    guard let mine = nodes.first(where: { $0.author?.login == viewer }) else {
+      let complete = !opinions.pageInfo.hasNextPage && nodes.count == opinions.nodes.count
+      return complete ? false : nil
+    }
+    guard mine.state == "CHANGES_REQUESTED" else { return false }
+    return mine.commit?.oid != pr.headRefOid
+  }
+
   func item(viewer: String, routing: Routing) -> Item? {
     switch self {
     case .pullRequest(let pr):
@@ -216,6 +243,7 @@ enum Node: Decodable {
         case .notAsked: nil
         case .allDirect: .direct
         case .fromRequests: reviewRoute(pr.reviewRequests, viewer: viewer)
+        case .returned: .returned
         }
       return Item(
         id: pr.id, number: pr.number, title: pr.title, repository: pr.repository, isPullRequest: true,
@@ -246,6 +274,7 @@ struct PullRequestNode: Decodable {
   var repository: Repository
   var latestOpinionatedReviews: Reviews?
   var reviewRequests: ReviewRequests?
+  var opinions: Opinions?
 }
 
 struct IssueNode: Decodable {
@@ -265,6 +294,22 @@ struct Reviews: Decodable {
 
 struct ReviewNode: Decodable {
   var state: String
+}
+
+struct Opinions: Decodable {
+  var pageInfo: PageInfo
+  var nodes: [Opinion?]
+}
+
+struct Opinion: Decodable {
+  var state: String
+  var author: Login?
+  /// Null when the commit is gone, e.g. after a force push: not the head.
+  var commit: Oid?
+}
+
+struct Oid: Decodable {
+  var oid: String
 }
 
 struct ReviewRequests: Decodable {

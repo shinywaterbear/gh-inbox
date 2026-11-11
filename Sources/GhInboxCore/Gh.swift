@@ -21,6 +21,16 @@ public struct SectionSpec: Sendable {
 /// Display order, which is also priority: an item shows in the first queue
 /// that has it.
 public let sections: [SectionSpec] = [
+  // A team request ends with a member's review, and an author may ask again
+  // without re-requesting, so no request remains to find. `Routing.returned`
+  // decides; `-review:approved` saves page space by dropping PRs GitHub's
+  // review decision approved, which can omit a change request that doesn't
+  // count toward that decision.
+  SectionSpec(
+    alias: "back", name: "Back to me", group: "Review",
+    empty: "Nothing you asked to change has been pushed since.",
+    scope: "is:open is:pr", qualifier: "reviewed-by:@me -author:@me -review:approved",
+    routing: .returned),
   // GitHub matches `user-review-requested` only against the viewer by name.
   SectionSpec(
     alias: "direct", name: "Asked of me", group: "Review", empty: "No one has asked you by name.",
@@ -45,7 +55,7 @@ public let sections: [SectionSpec] = [
 ]
 
 /// Requests through teams, hidden when the account can't be on one.
-public let teamSection = 1
+public let teamSection = 2
 
 /// Makes the first page the newest activity.
 let order = "sort:updated-desc"
@@ -80,13 +90,19 @@ public func searchURL(_ section: Int, host: String) -> String {
 /// the viewer.
 enum Routing: Sendable {
   case notAsked, allDirect, fromRequests
+  /// Keeps only PRs whose author pushed since the viewer requested changes.
+  case returned
 }
 
 /// Identity plus one section's newest `size` matches. Every request names
 /// the viewer, so results from two accounts are never combined.
 func sectionQuery(alias: String, search: String, size: Int, routing: Routing) -> String {
   let (requests, fragment) =
-    routing == .fromRequests ? (" nodes { ...requests }", Queries.requests) : ("", "")
+    switch routing {
+    case .fromRequests: (" nodes { ...requests }", Queries.requests)
+    case .returned: (" nodes { ...returned }", Queries.returned)
+    case .notAsked, .allDirect: ("", "")
+    }
   return """
     query {
       viewer { login url }

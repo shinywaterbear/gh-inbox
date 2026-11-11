@@ -100,7 +100,7 @@ private func refreshWith(_ inbox: inout Inbox, _ answers: [SectionFetch], at tim
 }
 
 private func four(_ a: SectionFetch, _ b: SectionFetch) -> [SectionFetch] {
-  [a, b, ok([]), ok([]), ok([])]
+  [a, b, ok([]), ok([]), ok([]), ok([])]
 }
 
 /// Answers the queued review fetch, and any check lookups it starts.
@@ -252,11 +252,11 @@ struct SectionStateTests {
     let waiting = pr("waiting", "h")
     var later = pr("later", "h")
     var inbox = Inbox()
-    refreshWith(&inbox, [ok([]), ok([]), ok([waiting, later]), ok([]), ok([later])])
+    refreshWith(&inbox, [ok([]), ok([]), ok([]), ok([waiting, later]), ok([]), ok([later])])
     // My open PRs fails; Also in my repos brings the newer, approved copy.
     later.review = .approved
-    refreshWith(&inbox, [ok([]), ok([]), ghFailed(), ok([]), ok([later])])
-    #expect(urls(inbox.sections[2]) == ["later", "waiting"])
+    refreshWith(&inbox, [ok([]), ok([]), ok([]), ghFailed(), ok([]), ok([later])])
+    #expect(urls(inbox.sections[3]) == ["later", "waiting"])
   }
 
   @Test func recoveryClearsErrorsAndNeverLoadedIsNotEmpty() {
@@ -272,10 +272,10 @@ struct SectionStateTests {
   @Test func oneSharedFailureIsReportedOnce() {
     var inbox = Inbox()
     let down = { failed(.network("dial tcp")) }
-    refreshWith(&inbox, [down(), down(), down(), down(), down()])
+    refreshWith(&inbox, [down(), down(), down(), down(), down(), down()])
     #expect(inbox.commonError == .network("dial tcp"))
     #expect(!inbox.anyLoaded)
-    refreshWith(&inbox, [down(), ghFailed(), down(), down(), down()])
+    refreshWith(&inbox, [down(), ghFailed(), down(), down(), down(), down()])
     #expect(inbox.commonError == nil, "different failures are shown apart")
   }
 
@@ -283,7 +283,7 @@ struct SectionStateTests {
     var inbox = Inbox()
     inbox.refresh()
     let left = drain(&inbox, [nil, ok([issue("x")])])
-    #expect(left.count == 4, "the other sections still running")
+    #expect(left.count == 4, "the other sections still running or queued")
     #expect(inbox.sections[1].loaded && !inbox.sections[0].loaded)
     #expect(inbox.visible()[1] == [0])
     #expect(inbox.anyBusy)
@@ -347,8 +347,8 @@ struct AccountTests {
   @Test func aCheckLookupFromAnotherAccountAlsoResets() {
     var inbox = Inbox()
     inbox.refresh()
-    // The last section frees a slot, so the check lookup starts.
-    let left = drain(&inbox, [ok([pr("PR_a", "h1")]), nil, nil, nil, ok([])])
+    // The last sections free a slot, so the check lookup starts.
+    let left = drain(&inbox, [ok([pr("PR_a", "h1")]), nil, nil, nil, ok([]), ok([])])
     let check = left.first { if case .checks = $0.job { true } else { false } }!
     let theirs = Outcome.checks(ChecksFetch(identity: someoneElse(), results: [("PR_a", passing("h1"))]))
     let v4 = inbox.finish(check, theirs, now: now)
@@ -383,7 +383,9 @@ struct AccountTests {
     inbox.refresh()
     var tickets = jobs(&inbox)
     inbox.finish(tickets.removeFirst(), .section(ok([])), now: now)
-    // The fifth section takes the freed slot; the next one goes to membership.
+    // The last two sections take the freed slots; the next goes to membership.
+    tickets.append(inbox.nextJob()!)
+    inbox.finish(tickets.removeFirst(), .section(ok([])), now: now)
     tickets.append(inbox.nextJob()!)
     inbox.finish(tickets.removeFirst(), .section(ok([])), now: now)
     let membership = inbox.nextJob()!
@@ -475,7 +477,7 @@ struct PlacementTests {
     answers[1] = ghFailed()
     _ = refreshOneByOne(&inbox, answers, [0, 1, 2, 3])
     #expect(rowsAndDots(inbox) == before)
-    #expect(inbox.sections.map { $0.error != nil } == [false, true, false, false, false])
+    #expect(inbox.sections.map { $0.error != nil } == [false, true, false, false, false, false])
   }
 
   @Test func aChangedRefreshTouchesOnlyTheChangedRows() {
@@ -532,18 +534,18 @@ struct PlacementTests {
   @Test func copiedDataKeepsItsOwnFreshness() {
     func shownHeads(_ inbox: Inbox) -> [String] {
       let visible = inbox.visible()
-      return (0..<3).flatMap { s in visible[s].map { "\(s):\(inbox.sections[s].items[$0].head ?? "")" } }
+      return (1..<4).flatMap { s in visible[s].map { "\(s):\(inbox.sections[s].items[$0].head ?? "")" } }
     }
     var inbox = Inbox()
     // Round 1: review has A. Round 2: review fails, assigned has A.
-    refreshWith(&inbox, [ok([pr("x", "A")]), ok([]), ok([]), ok([]), ok([])])
-    refreshWith(&inbox, [ghFailed(), ok([]), ok([pr("x", "A")]), ok([]), ok([])])
+    refreshWith(&inbox, [ok([]), ok([pr("x", "A")]), ok([]), ok([]), ok([]), ok([])])
+    refreshWith(&inbox, [ok([]), ghFailed(), ok([]), ok([pr("x", "A")]), ok([]), ok([])])
     // Round 3: authored brings B; review shows it in place.
-    refreshWith(&inbox, [ghFailed(), ok([pr("x", "B")]), ghFailed(), ok([]), ok([])])
-    #expect(shownHeads(inbox) == ["0:B"])
+    refreshWith(&inbox, [ok([]), ghFailed(), ok([pr("x", "B")]), ghFailed(), ok([]), ok([])])
+    #expect(shownHeads(inbox) == ["1:B"])
     // Round 4: authored drops x while review and assigned fail.
-    refreshWith(&inbox, [ghFailed(), ok([]), ghFailed(), ok([]), ok([])])
-    #expect(shownHeads(inbox) == ["0:B"], "assigned's round-2 copy is older than B")
+    refreshWith(&inbox, [ok([]), ghFailed(), ok([]), ghFailed(), ok([]), ok([])])
+    #expect(shownHeads(inbox) == ["1:B"], "assigned's round-2 copy is older than B")
   }
 }
 

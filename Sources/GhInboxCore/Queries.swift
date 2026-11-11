@@ -37,6 +37,19 @@ enum Queries {
 
     """
 
+  /// Added to Back to me's search only: each reviewer's latest opinion and
+  /// the commit it was on. Aliased, since `items` asks for the same field
+  /// with other arguments.
+  static let returned = """
+    fragment returned on PullRequest {
+      opinions: latestOpinionatedReviews(first: 100) {
+        pageInfo { hasNextPage }
+        nodes { state author { login } commit { oid } }
+      }
+    }
+
+    """
+
   /// A PR's check state looked up by id, plus the checks its base branch
   /// requires: GitHub's rollup omits a required check that never reported.
   static let checks = """

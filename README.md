@@ -33,10 +33,11 @@ For a quick look without installing, `swift run` starts it from the checkout.
 
 ## Using it
 
-- The sidebar lists five queues: review requests asked of you by name,
-  those that came through your teams, your open PRs, what's assigned to
-  you, and what's left in repos you own. An item shows once, in the first
-  queue that has it. `cmd-1` to `cmd-5` pick a queue; Tab, or the left and
+- The sidebar lists six queues: PRs whose author pushed since you
+  requested changes, review requests asked of you by name, those that
+  came through your teams, your open PRs, what's assigned to you, and
+  what's left in repos you own. An item shows once, in the first queue
+  that has it. `cmd-1` to `cmd-6` pick a queue; Tab, or the left and
   right arrows, move between the sidebar and the list.
 - A long queue ends in "Load 25 more" and "Open on GitHub"; `cmd-l` and
   `shift-cmd-o` do the same from the keyboard.
