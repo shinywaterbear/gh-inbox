@@ -21,14 +21,14 @@ public struct SectionSpec: Sendable {
 /// Display order, which is also priority: an item shows in the first queue
 /// that has it.
 public let sections: [SectionSpec] = [
-  // A team request ends with a member's review, and an author may ask again
-  // without re-requesting, so no request remains to find. `Routing.returned`
+  // Any review, even a comment, ends the request it answers, and an author
+  // may ask again without re-requesting, so no request remains to find. `Routing.returned`
   // decides; `-review:approved` saves page space by dropping PRs GitHub's
   // review decision approved, which can omit a change request that doesn't
   // count toward that decision.
   SectionSpec(
     alias: "back", name: "Back to me", group: "Review",
-    empty: "Nothing you asked to change has been pushed since.",
+    empty: "Nothing you reviewed has been pushed since.",
     scope: "is:open is:pr", qualifier: "reviewed-by:@me -author:@me -review:approved",
     routing: .returned),
   // GitHub matches `user-review-requested` only against the viewer by name.

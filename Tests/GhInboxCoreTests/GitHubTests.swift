@@ -91,6 +91,7 @@ private func opined(
       ["state": .string(state), "author": ["login": .string(login)], "commit": ["oid": .string(commit)]]
     ],
   ]
+  node["reviews"] = node["opinions"]
   return node
 }
 
@@ -98,6 +99,25 @@ private func opined(
 private func gone(_ number: Int) -> JSON {
   var node = opined(number, "CHANGES_REQUESTED")
   node["opinions"]["nodes"][0]["commit"] = .null
+  node["reviews"] = node["opinions"]
+  return node
+}
+
+/// `pr(number)` as the viewer last left it: an optional standing opinion and
+/// the latest review of any kind, each on the head or an older commit, among
+/// `others` other reviewers' latest reviews.
+private func left(
+  _ number: Int, opinion: String? = nil, review: String, onHead: Bool, others: Int = 0,
+  decision: String = "REVIEW_REQUIRED", draft: Bool = false
+) -> JSON {
+  var node = pr(number, "2026-11-01T00:00:00Z", draft: draft, decision: decision)
+  let commit: JSON = ["oid": .string(onHead ? "sha\(number)" : "old")]
+  let mine: (String) -> JSON = { ["state": .string($0), "author": ["login": "me"], "commit": commit] }
+  let theirs: JSON = .array(
+    (0..<others).map { _ in ["state": "COMMENTED", "author": ["login": "other"], "commit": ["oid": "old"]] })
+  let list: ([JSON]) -> JSON = { ["pageInfo": ["hasNextPage": false], "nodes": .array($0)] }
+  node["opinions"] = list(opinion.map { [mine($0)] } ?? [])
+  if case .array(let rest) = theirs { node["reviews"] = list([mine(review)] + rest) }
   return node
 }
 
@@ -120,6 +140,54 @@ struct BackToMeTests {
     #expect(found.waiting == 3, "pushed nothing since, approved, or never reviewed by me")
     #expect(warnings == [.unreadable(1)], "a cut-off list may hide my opinion")
     #expect(found.total == 6 && found.returned == 6)
+  }
+
+  /// An anonymized copy of a real account's Back to me search: a review that
+  /// only commented leaves no opinion, yet the author pushed since.
+  @Test func keepsCommentOnlyReviewsPushedSince() async throws {
+    let nodes: JSON = [
+      left(1, review: "COMMENTED", onHead: false, others: 1),
+      left(
+        2, opinion: "CHANGES_REQUESTED", review: "CHANGES_REQUESTED", onHead: true,
+        decision: "CHANGES_REQUESTED"),
+      left(
+        3, opinion: "CHANGES_REQUESTED", review: "CHANGES_REQUESTED", onHead: true,
+        decision: "CHANGES_REQUESTED"),
+      left(4, review: "COMMENTED", onHead: false, others: 1),
+      left(5, review: "COMMENTED", onHead: true, others: 1),
+      left(
+        6, opinion: "CHANGES_REQUESTED", review: "CHANGES_REQUESTED", onHead: true,
+        decision: "CHANGES_REQUESTED"),
+      left(
+        7, opinion: "CHANGES_REQUESTED", review: "CHANGES_REQUESTED", onHead: true, others: 1,
+        decision: "CHANGES_REQUESTED"),
+      left(
+        8, opinion: "CHANGES_REQUESTED", review: "CHANGES_REQUESTED", onHead: true,
+        decision: "CHANGES_REQUESTED"),
+      left(9, review: "COMMENTED", onHead: true, others: 2, decision: "CHANGES_REQUESTED"),
+      left(
+        10, opinion: "CHANGES_REQUESTED", review: "CHANGES_REQUESTED", onHead: true,
+        decision: "CHANGES_REQUESTED"),
+      left(11, review: "COMMENTED", onHead: false, others: 6, draft: true),
+    ]
+    let json = response(conn([]), conn([]), back: conn(nodes))
+    let (found, warnings) = try await page(responding(json).section(back))
+    #expect(found.items.map(\.number) == [1, 4, 11])
+    #expect(found.waiting == 8 && warnings.isEmpty)
+  }
+
+  /// A later comment neither cancels an approval nor, on the head, a change
+  /// request: it shows I have seen what was pushed.
+  @Test func weighsTheLatestReviewAgainstTheStandingOpinion() async throws {
+    let nodes: JSON = [
+      left(1, opinion: "APPROVED", review: "COMMENTED", onHead: false),
+      left(2, opinion: "CHANGES_REQUESTED", review: "COMMENTED", onHead: true),
+      left(3, opinion: "CHANGES_REQUESTED", review: "COMMENTED", onHead: false),
+      left(4, opinion: "DISMISSED", review: "DISMISSED", onHead: false),
+    ]
+    let json = response(conn([]), conn([]), back: conn(nodes))
+    let (found, _) = try await page(responding(json).section(back))
+    #expect(found.items.map(\.number) == [3, 4])
   }
 
   @Test func searchesWhatIReviewedButDidNotWriteOrApprove() {

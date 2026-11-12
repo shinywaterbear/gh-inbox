@@ -215,19 +215,20 @@ enum Node: Decodable {
     }
   }
 
-  /// For `Routing.returned`, whether the viewer's latest opinion requested
-  /// changes on an older commit than the head; nil when the opinions came
-  /// back incomplete without it. Always true for other routings.
+  /// For `Routing.returned`, whether the viewer's latest review, of any
+  /// kind, is on an older commit than the head and doesn't stand as an
+  /// approval; nil when an incomplete list may hide what decides it. Always
+  /// true for other routings.
   func sentBack(viewer: String, routing: Routing) -> Bool? {
     guard routing == .returned else { return true }
-    guard case .pullRequest(let pr) = self, let opinions = pr.opinions else { return nil }
-    let nodes = opinions.nodes.compactMap { $0 }
-    guard let mine = nodes.first(where: { $0.author?.login == viewer }) else {
-      let complete = !opinions.pageInfo.hasNextPage && nodes.count == opinions.nodes.count
-      return complete ? false : nil
+    guard case .pullRequest(let pr) = self, let latest = pr.reviews?.by(viewer) else { return nil }
+    guard let review = latest, review.state != "APPROVED", review.commit?.oid != pr.headRefOid else {
+      return false
     }
-    guard mine.state == "CHANGES_REQUESTED" else { return false }
-    return mine.commit?.oid != pr.headRefOid
+    if review.state == "CHANGES_REQUESTED" { return true }
+    // A comment after an approval leaves the approval standing.
+    guard let opinion = pr.opinions?.by(viewer) else { return nil }
+    return opinion?.state != "APPROVED"
   }
 
   func item(viewer: String, routing: Routing) -> Item? {
@@ -275,6 +276,7 @@ struct PullRequestNode: Decodable {
   var latestOpinionatedReviews: Reviews?
   var reviewRequests: ReviewRequests?
   var opinions: Opinions?
+  var reviews: Opinions?
 }
 
 struct IssueNode: Decodable {
@@ -299,6 +301,14 @@ struct ReviewNode: Decodable {
 struct Opinions: Decodable {
   var pageInfo: PageInfo
   var nodes: [Opinion?]
+
+  /// The viewer's entry; `.some(nil)` when a complete list has none, nil
+  /// when a further page or a withheld entry may hold it.
+  func by(_ viewer: String) -> Opinion?? {
+    let found = nodes.compactMap { $0 }
+    if let mine = found.first(where: { $0.author?.login == viewer }) { return mine }
+    return !pageInfo.hasNextPage && found.count == nodes.count ? .some(nil) : nil
+  }
 }
 
 struct Opinion: Decodable {

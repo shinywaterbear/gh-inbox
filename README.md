@@ -34,7 +34,7 @@ For a quick look without installing, `swift run` starts it from the checkout.
 ## Using it
 
 - The sidebar lists six queues: PRs whose author pushed since you
-  requested changes, review requests asked of you by name, those that
+  reviewed them without approving, review requests asked of you by name, those that
   came through your teams, your open PRs, what's assigned to you, and
   what's left in repos you own. An item shows once, in the first queue
   that has it. `cmd-1` to `cmd-6` pick a queue; Tab, or the left and

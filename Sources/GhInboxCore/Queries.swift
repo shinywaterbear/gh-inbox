@@ -44,9 +44,15 @@ enum Queries {
     fragment returned on PullRequest {
       opinions: latestOpinionatedReviews(first: 100) {
         pageInfo { hasNextPage }
-        nodes { state author { login } commit { oid } }
+        nodes { ...opinion }
+      }
+      reviews: latestReviews(first: 100) {
+        pageInfo { hasNextPage }
+        nodes { ...opinion }
       }
     }
+
+    fragment opinion on PullRequestReview { state author { login } commit { oid } }
 
     """
 
