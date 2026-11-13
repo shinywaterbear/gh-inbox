@@ -71,6 +71,38 @@ your token.
 - The All/Personal/Org tabs appear once both kinds of repository show up;
   `opt-cmd-1`/`2`/`3` pick one.
 
+## JSON output
+
+With `--json`, the same binary prints its queues to stdout and exits. It
+never starts the app: no window, no Dock icon, and a running window is
+unaffected. Run it from the installed app, or from a checkout without
+installing:
+
+```bash
+/Applications/GhInbox.app/Contents/MacOS/gh-inbox --json
+swift run -q gh-inbox --json --queue back-to-me --limit 50
+swift run -q gh-inbox --help    # every queue's key and what it holds
+```
+
+Only the JSON goes to stdout, so it pipes cleanly. It runs one refresh,
+check states included. Updating the app updates it
+too, so a symlink to the installed path on your PATH keeps working.
+
+Each queue in `queues` has its `key` and `name`, its `items`, how many GitHub
+`matched`, whether the list is `truncated` and why fewer show
+(`shortfall`), and an `error` and `warnings` when something didn't load.
+An item shows once, in the first queue that has it, as in the window; with
+`--queue`, the earlier queues are still fetched to decide that, and one
+that fails is named in the queue's `warnings` and exits 1. Each item has
+its `url`, `repository`, `number`, `title`, `author`, `type`
+(`pull_request` or `issue`), `draft`, `review` (`approved`,
+`changes_requested`, `review_required` or null), `checks` (`passing`,
+`failing`, `pending`, `none`, `unknown`, or null for an issue), `route`
+(how a review reached you, when known) and `updated_at`.
+
+It exits 1 when any queue failed to load (the JSON still holds the rest and
+each failure's reason) and 2 for a usage error.
+
 ## Development
 
 `script/check` lints, builds and tests everything, the AppKit window

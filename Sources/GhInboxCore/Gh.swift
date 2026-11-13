@@ -6,9 +6,13 @@ import Foundation
 
 public struct SectionSpec: Sendable {
   let alias: String
+  /// The queue's name on the command line (`--queue`), kept stable for scripts.
+  public let key: String
   public let name: String
   /// The sidebar heading the queue sits under.
   public let group: String
+  /// What the queue holds, for `--help`.
+  public let about: String
   /// What an empty queue says.
   public let empty: String
   let scope: String
@@ -27,30 +31,36 @@ public let sections: [SectionSpec] = [
   // review decision approved, which can omit a change request that doesn't
   // count toward that decision.
   SectionSpec(
-    alias: "back", name: "Back to me", group: "Review",
+    alias: "back", key: "back-to-me", name: "Back to me", group: "Review",
+    about: "PRs you reviewed, not approved, that the author has pushed to since",
     empty: "Nothing you reviewed has been pushed since.",
     scope: "is:open is:pr", qualifier: "reviewed-by:@me -author:@me -review:approved",
     routing: .returned),
   // GitHub matches `user-review-requested` only against the viewer by name.
   SectionSpec(
-    alias: "direct", name: "Asked of me", group: "Review", empty: "No one has asked you by name.",
+    alias: "direct", key: "asked-of-me", name: "Asked of me", group: "Review",
+    about: "PRs whose review is requested of you by name", empty: "No one has asked you by name.",
     scope: "is:open is:pr", qualifier: "user-review-requested:@me", routing: .allDirect),
   // script/check-review-split found it disjoint from the queue above and,
   // with it, equal to `review-requested:@me` on a busy work account. If it
   // ever misbehaves, plain `review-requested:@me` works too: a PR also
   // asked by name shows only in the queue above.
   SectionSpec(
-    alias: "team", name: "Via my teams", group: "Review", empty: "Nothing waiting on your teams.",
+    alias: "team", key: "via-my-teams", name: "Via my teams", group: "Review",
+    about: "PRs whose review is requested of a team you are on", empty: "Nothing waiting on your teams.",
     scope: "is:open is:pr", qualifier: "review-requested:@me -user-review-requested:@me",
     routing: .fromRequests),
   SectionSpec(
-    alias: "authored", name: "My open PRs", group: "Mine", empty: "You have no open PRs.",
+    alias: "authored", key: "my-open-prs", name: "My open PRs", group: "Mine", about: "PRs you opened",
+    empty: "You have no open PRs.",
     scope: "is:open is:pr", qualifier: "author:@me", ranking: .merge),
   SectionSpec(
-    alias: "assigned", name: "Assigned to me", group: "Mine", empty: "Nothing is assigned to you.",
+    alias: "assigned", key: "assigned-to-me", name: "Assigned to me", group: "Mine",
+    about: "Issues and PRs assigned to you", empty: "Nothing is assigned to you.",
     scope: "is:open", qualifier: "assignee:@me"),
   SectionSpec(
-    alias: "personal", name: "Also in my repos", group: "Mine", empty: "Nothing else is open in your repos.",
+    alias: "personal", key: "also-in-my-repos", name: "Also in my repos", group: "Mine",
+    about: "Anything else open in repositories you own", empty: "Nothing else is open in your repos.",
     scope: "is:open", qualifier: "user:@me"),
 ]
 
