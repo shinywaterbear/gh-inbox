@@ -21,11 +21,24 @@ elif [ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" = "$root" ]; th
 	fi
 fi
 
+# For the app's update check: where the source is, and whether it is a git
+# checkout to pull into or a downloaded copy to replace with a newer download.
+# Only a copy of the public repository checks, which its CFBundleVersion, the
+# sync number that repository stamps, tells apart.
+kind=copy
+if [ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" = "$root" ]; then
+	kind=git
+fi
+
 swift build -c release --product gh-inbox
 binary="$(swift build -c release --show-bin-path)/gh-inbox"
-app="$root/dist/GhInbox.app"
-
-rm -rf "$app"
+target="$root/dist/GhInbox.app"
+# Assembled beside the target and swapped in once signed, so a failed build
+# leaves the last app, which may be the one running, whole.
+mkdir -p "$root/dist"
+staging="$(mktemp -d "$root/dist/.GhInbox.XXXXXX")"
+trap 'rm -rf "$staging"' EXIT
+app="$staging/GhInbox.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/gh-inbox"
 cp "$root/Resources/Info.plist" "$app/Contents/Info.plist"
@@ -33,6 +46,8 @@ cp "$root/Resources/Info.plist" "$app/Contents/Info.plist"
 if [ -n "$revision" ]; then
 	plutil -replace SourceRevision -string "$revision" "$app/Contents/Info.plist"
 fi
+plutil -replace SourceDirectory -string "$root" "$app/Contents/Info.plist"
+plutil -replace SourceKind -string "$kind" "$app/Contents/Info.plist"
 
 # The icon set macOS expects, from the 512-pixel source; 512@2x would only upscale it.
 iconset="$(mktemp -d)/AppIcon.iconset"
@@ -48,4 +63,9 @@ rm -rf "$(dirname "$iconset")"
 
 codesign --force --options runtime --sign - "$app"
 codesign --verify --strict "$app"
-echo "$app"
+rm -rf "$staging/old"
+if [ -e "$target" ]; then
+	mv "$target" "$staging/old"
+fi
+mv "$app" "$target" || { mv "$staging/old" "$target"; exit 1; }
+echo "$target"

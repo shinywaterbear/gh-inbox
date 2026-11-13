@@ -37,6 +37,8 @@ struct Reply: Sendable {
   var body: Data
   /// `X-OAuth-Scopes`; absent for fine-grained tokens and apps.
   var scopes: String?
+  /// `ETag`, for a conditional request next time.
+  var etag: String? = nil
   var url: String
 
   var success: Bool { (200..<300).contains(status) }
@@ -132,10 +134,12 @@ public struct GitHub: Sendable {
     }
     if let error { return .failure(.network(error.localizedDescription)) }
     guard let http = response as? HTTPURLResponse else { return .failure(.parse("no HTTP response")) }
-    let scopes = http.allHeaderFields.first { ($0.key as? String)?.lowercased() == "x-oauth-scopes" }?.value
+    func header(_ name: String) -> String? {
+      http.allHeaderFields.first { ($0.key as? String)?.lowercased() == name }?.value as? String
+    }
     return .success(
       Reply(
-        status: http.statusCode, body: data ?? Data(), scopes: scopes as? String,
+        status: http.statusCode, body: data ?? Data(), scopes: header("x-oauth-scopes"), etag: header("etag"),
         url: request.url?.absoluteString ?? ""))
   }
 }

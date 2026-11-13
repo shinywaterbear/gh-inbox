@@ -5,6 +5,8 @@ import Foundation
 
 public enum Tone: Sendable, Equatable {
   case error, warning
+  /// News rather than a problem: a newer version.
+  case info
 }
 
 /// The moment a render describes: ages and "updated" notes are read from it,
@@ -29,10 +31,22 @@ public struct Now: Sendable {
 public struct Notice: Sendable, Equatable {
   public var text: String
   public var tone: Tone
+  /// What clicking its banner does.
+  public var click: Click
 
-  public init(text: String, tone: Tone) {
+  public enum Click: Sendable, Equatable {
+    /// Copies the full text.
+    case copy
+    /// Starts the update (`Updater.update`).
+    case update
+    /// Nothing: a step in progress.
+    case inert
+  }
+
+  public init(text: String, tone: Tone, click: Click = .copy) {
     self.text = text
     self.tone = tone
+    self.click = click
   }
 }
 
@@ -425,6 +439,51 @@ public func banners(_ inbox: Inbox, queue: Int? = nil, now: Now) -> [Notice] {
   }
   if let queue { result += notices(inbox, queue: queue, now: now) }
   return result
+}
+
+/// The update's banners, above every other: how far behind, an update
+/// running, or why the last one failed.
+public func updateBanners(_ status: UpdateStatus?) -> [Notice] {
+  guard let status else { return [] }
+  if status.updating {
+    let place = status.directory.map { status.kind == .git ? " in \($0)" : " beside \($0)" } ?? ""
+    let doing = status.kind == .git ? "pulling the latest" : "downloading the latest"
+    return [Notice(text: "Updating gh-inbox: \(doing) and rebuilding\(place)…", tone: .info, click: .inert)]
+  }
+  var result: [Notice] = []
+  if case .behind(let count) = status.freshness {
+    let behind = "gh-inbox is \(counted(count, "update")) behind"
+    let fetch = status.kind == .git ? "pull" : "download"
+    result.append(
+      status.directory != nil
+        ? Notice(
+          text: "\(behind). Click to \(fetch) the latest, rebuild and reopen.", tone: .info, click: .update)
+        : Notice(
+          text: status.kind == .git
+            ? "\(behind): pull main, run script/build, then reopen gh-inbox."
+            : "\(behind): download the latest from github.com/\(status.repository), run script/build, then reopen gh-inbox.",
+          tone: .info))
+  }
+  if let failure = status.failure {
+    result.append(Notice(text: "Couldn't update gh-inbox: \(failure)", tone: .error))
+  }
+  return result
+}
+
+/// What the confirmation before an update says it will do, or nil when
+/// there's nothing a click can update.
+public func updateConfirmation(_ status: UpdateStatus) -> String? {
+  guard let directory = status.directory else { return nil }
+  switch status.kind {
+  case .git:
+    return "This brings main in \(directory) up to date with github.com/\(status.repository) "
+      + "(only if it can move straight forward), runs script/build there, and reopens gh-inbox from the new build."
+  case .copy:
+    let parent = URL(fileURLWithPath: directory).deletingLastPathComponent().path
+    return
+      "This downloads the latest gh-inbox into a new folder in \(parent), leaving \(directory) as it is, "
+      + "runs script/build there, and reopens gh-inbox from the new build."
+  }
 }
 
 /// The heading pinned over the top of the list when `firstVisible` is the

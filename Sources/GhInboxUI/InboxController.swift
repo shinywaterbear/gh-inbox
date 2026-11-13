@@ -30,6 +30,8 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     labels: ownerTabs.map(\.1), trackingMode: .selectOne, target: nil, action: nil)
   private lazy var refreshControl = RefreshControl(target: self, action: #selector(refresh(_:)))
   private let banners = BannerList()
+  /// Checks for a newer published source; nil for a build that records none.
+  private let updater: Updater?
   private let sidebar = Sidebar()
   private let list = InboxList()
   private let allClear = NSStackView()
@@ -47,13 +49,15 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   /// `locale` how dates read; `remembersQueue` false neither restores nor
   /// saves the last queue; `restoresFrame` false leaves the saved window
   /// frame alone, for windows that are never shown; `github` is where
-  /// requests go.
+  /// requests go; `updater` checks for a newer version, none when nil.
   public init(
     now: @escaping @MainActor () -> Date = Date.init, timeZone: TimeZone = .current,
     locale: Locale = .current,
-    restoresFrame: Bool = true, remembersQueue: Bool = true, github: GitHub = .live()
+    restoresFrame: Bool = true, remembersQueue: Bool = true, github: GitHub = .live(),
+    updater: Updater? = .live()
   ) {
     model = InboxModel(github: github)
+    self.updater = updater
     self.remembersQueue = remembersQueue
     self.now = now
     self.timeZone = timeZone
@@ -77,6 +81,8 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     window.isExcludedFromWindowsMenu = true
     super.init(window: window)
     model.changed = { [weak self] in self?.render() }
+    updater?.changed = { [weak self] in self?.render() }
+    banners.onUpdate = { [weak self] in self?.confirmUpdate() }
     window.delegate = self
     layout(in: window)
     window.setContentSize(Metrics.windowSize)
@@ -87,10 +93,12 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     }
     list.onLoadMore = { [weak self] section in self?.loadMore(section) }
     refresh(nil)
+    updater?.checkIfDue()
     timer = Timer.scheduledTimer(withTimeInterval: tick, repeats: true) { [weak self] _ in
       MainActor.assumeIsolated {
         guard let self, self.presence != .closed else { return }
         self.refreshIfDue(.tick)
+        self.updater?.checkIfDue()
         // Ages move without new data; only the rows they changed update.
         self.render()
       }
@@ -229,6 +237,42 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     window?.makeFirstResponder(sidebar.keyView)
   }
 
+  // MARK: Updating
+
+  /// Asks first, naming the source and what happens to it, since the
+  /// update changes or adds to it and replaces this app.
+  private func confirmUpdate() {
+    guard let window, let updater, !updater.updating, let text = updateConfirmation(updater.status) else {
+      return
+    }
+    let alert = NSAlert()
+    alert.messageText = "Update gh-inbox?"
+    alert.informativeText = text
+    alert.addButton(withTitle: "Update")
+    alert.addButton(withTitle: "Cancel")
+    alert.beginSheetModal(for: window) { [weak self] response in
+      MainActor.assumeIsolated {
+        guard let self, response == .alertFirstButtonReturn else { return }
+        self.update()
+      }
+    }
+  }
+
+  /// Brings the source forward and builds it off the main thread, puts the
+  /// new app where this one runs from, and reopens it. A failure shows as a
+  /// banner.
+  private func update() {
+    guard let updater else { return }
+    let bundle = Bundle.main.bundleURL
+    let running = bundle.pathExtension == "app" ? bundle : nil
+    Task {
+      guard let app = await updater.update(replacing: running) else { return }
+      if let error = relaunch(app) {
+        updater.reopenFailed("the new build is at \(app.path), but gh-inbox couldn't reopen it: \(error)")
+      }
+    }
+  }
+
   // MARK: Refreshing
 
   private func refreshIfDue(_ trigger: Trigger) {
@@ -363,17 +407,20 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     showTabs(inbox.showOwnerTabs)
     tabs.selectedSegment = ownerTabs.firstIndex { $0.0 == inbox.ownerFilter } ?? 0
 
-    // One shared failure before any data is shown once, as a panel.
+    // One shared failure before any data is shown once, as a panel, under
+    // the update's banners alone.
     let failure = inbox.anyLoaded ? nil : inbox.commonError
+    let updates = updateBanners(updater?.status)
     unavailable.isHidden = failure == nil
-    banners.isHidden = failure != nil
+    banners.isHidden = failure != nil && updates.isEmpty
     if let failure {
+      banners.show(updates)
       unavailable.show(failure, retrying: retrying(inbox))
       list.show([], queue: queue)
       allClear.isHidden = true
       return
     }
-    banners.show(GhInboxCore.banners(inbox, queue: queue, now: now))
+    banners.show(updates + GhInboxCore.banners(inbox, queue: queue, now: now))
     list.show(shown, queue: queue)
     let loading = listed.first { $0.section == queue }?.status == .loading
     let message =
@@ -443,14 +490,22 @@ final class RootView: NSView {
 /// tooltip stays open as a banner's age moves.
 final class BannerList: NSView {
   private var views: [Banner] = []
+  /// A click on a banner that updates the app.
+  var onUpdate: () -> Void = {}
 
   override var isFlipped: Bool { true }
+
+  /// The list starts below the banners, so hiding them moves it too.
+  override var isHidden: Bool {
+    didSet { if isHidden != oldValue { superview?.needsLayout = true } }
+  }
 
   func show(_ notices: [Notice]) {
     var changed = views.count != notices.count
     while views.count > notices.count { views.removeLast().removeFromSuperview() }
     while views.count < notices.count {
       let banner = Banner()
+      banner.onUpdate = { [weak self] in self?.onUpdate() }
       views.append(banner)
       addSubview(banner)
     }
@@ -474,9 +529,11 @@ final class BannerList: NSView {
 }
 
 /// A full-width notice above the list, tinted by its tone: two lines at
-/// most, the rest a hover away, and a click copies it. Not selectable
-/// text, which would take the list's arrow keys and keep them.
+/// most, the rest a hover away, and a click copies it, or does what the
+/// notice says (`Notice.Click`). Not selectable text, which would take the
+/// list's arrow keys and keep them.
 final class Banner: NSView {
+  var onUpdate: () -> Void = {}
   private let icon = NSImageView()
   private let field = NSTextField(wrappingLabelWithString: "")
   /// Held here: AppKit doesn't retain a tooltip's owner.
@@ -509,9 +566,16 @@ final class Banner: NSView {
       icon.contentTintColor = notice.tone.color
       needsDisplay = true
     }
+    let clickChanged = notice.click != self.notice?.click
     self.notice = notice
     field.show(notice.text)
-    toolTipOwner.text = "\(notice.text)\n\nClick to copy."
+    toolTipOwner.text =
+      switch notice.click {
+      case .copy: "\(notice.text)\n\nClick to copy."
+      case .update: "\(notice.text)\n\nClick to update."
+      case .inert: notice.text
+      }
+    if clickChanged { window?.invalidateCursorRects(for: self) }
     needsLayout = true
     return true
   }
@@ -553,12 +617,17 @@ final class Banner: NSView {
 
   override func mouseDown(with event: NSEvent) {
     guard let notice else { return }
-    NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(notice.text, forType: .string)
+    switch notice.click {
+    case .copy:
+      NSPasteboard.general.clearContents()
+      NSPasteboard.general.setString(notice.text, forType: .string)
+    case .update: onUpdate()
+    case .inert: break
+    }
   }
 
   override func resetCursorRects() {
-    addCursorRect(bounds, cursor: .pointingHand)
+    if notice?.click != .inert { addCursorRect(bounds, cursor: .pointingHand) }
   }
 
   override var wantsUpdateLayer: Bool { true }
@@ -671,4 +740,20 @@ final class RefreshControl: NSView {
       x: ((bounds.width - size.width) / 2).rounded(), y: ((bounds.height - size.height) / 2).rounded(),
       width: size.width, height: size.height)
   }
+}
+
+/// Quits, and opens `app` once this process has gone, so the new build
+/// starts rather than the old one coming forward. Stays put, and says why,
+/// if the waiter can't start.
+@MainActor
+private func relaunch(_ app: URL) -> String? {
+  let waiter = Process()
+  waiter.executableURL = URL(fileURLWithPath: "/bin/sh")
+  waiter.arguments = [
+    "-c", "while /bin/kill -0 \"$0\" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open \"$1\"",
+    "\(ProcessInfo.processInfo.processIdentifier)", app.path,
+  ]
+  do { try waiter.run() } catch { return error.localizedDescription }
+  NSApp.terminate(nil)
+  return nil
 }

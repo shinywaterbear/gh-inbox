@@ -36,6 +36,14 @@ enum LoginEnvironment {
     return env
   }
 
+  /// For an update's build, always the login shell's, read afresh: a
+  /// toolchain is usually first on PATH only once the shell's profile has
+  /// run, whether or not the inherited PATH finds gh. Nothing over the
+  /// inherited environment when the shell can't be read.
+  static func forBuild() -> [EnvVar] {
+    read(shell: shell(), timeout: timeout) ?? []
+  }
+
   /// The account's shell, which a Finder launch does not export as `$SHELL`.
   static func shell() -> String {
     if let record = getpwuid(getuid()), let shell = record.pointee.pw_shell {

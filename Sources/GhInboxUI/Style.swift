@@ -60,6 +60,7 @@ extension Tone {
     switch self {
     case .error: .systemRed
     case .warning: .systemOrange
+    case .info: .controlAccentColor
     }
   }
 
@@ -67,6 +68,7 @@ extension Tone {
     switch self {
     case .error: "xmark.octagon.fill"
     case .warning: "exclamationmark.triangle.fill"
+    case .info: "arrow.down.circle.fill"
     }
   }
 }

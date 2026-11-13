@@ -31,6 +31,24 @@ Finder or the Dock, it finds `gh` through your login shell's PATH.
 
 For a quick look without installing, `swift run` starts it from the checkout.
 
+## Updating
+
+gh-inbox checks main hourly and shows a banner when it's behind. Click it to
+update, rebuild and reopen:
+
+- **Clone or fork:** main fast-forwards to this repository's main. If yours
+  has commits of its own, it's left alone and the banner says how to merge.
+- **Downloaded zip:** the latest zip unpacks into a new folder beside yours
+  (`gh-inbox-13`) and builds there. An app you copied elsewhere is replaced;
+  one still in the old folder's `dist` stays put and the new one opens. Once
+  it opens, the old folder can go.
+
+By hand: `git pull` (or download the zip again), `script/build`, copy
+`dist/GhInbox.app` over your installed copy, and reopen.
+
+The check fetches one small file from `raw.githubusercontent.com`, without
+your token.
+
 ## Using it
 
 - The sidebar lists six queues: PRs whose author pushed since you
