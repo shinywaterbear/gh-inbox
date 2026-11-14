@@ -95,13 +95,26 @@ An item shows once, in the first queue that has it, as in the window; with
 `--queue`, the earlier queues are still fetched to decide that, and one
 that fails is named in the queue's `warnings` and exits 1. Each item has
 its `url`, `repository`, `number`, `title`, `author`, `type`
-(`pull_request` or `issue`), `draft`, `review` (`approved`,
+(`pull_request` or `issue`), `in_queues` (every queue it matched, the one it
+shows in first: a PR pushed since your review that's also re-requested of
+you shows in Back to me, with `asked-of-me` second), `draft`, `review` (`approved`,
 `changes_requested`, `review_required` or null), `checks` (`passing`,
 `failing`, `pending`, `none`, `unknown`, or null for an issue), `route`
 (how a review reached you, when known) and `updated_at`.
 
 It exits 1 when any queue failed to load (the JSON still holds the rest and
 each failure's reason) and 2 for a usage error.
+
+While the window is open, each refresh that finishes also writes the same
+JSON, every queue whichever tab is showing, to
+`~/Library/Caches/gh-inbox/inbox.json`, with `generated_at` for when that
+refresh finished. Reading it costs no requests; it's as fresh as the
+window's own refreshes (every 2 minutes focused, 10 in the background, none
+while closed), so check `generated_at` and run `--json` when it's too old:
+
+```bash
+jq '.queues[] | select(.key == "asked-of-me") | .items[].url' ~/Library/Caches/gh-inbox/inbox.json
+```
 
 ## Development
 

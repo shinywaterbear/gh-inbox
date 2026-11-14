@@ -49,14 +49,20 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   /// `locale` how dates read; `remembersQueue` false neither restores nor
   /// saves the last queue; `restoresFrame` false leaves the saved window
   /// frame alone, for windows that are never shown; `github` is where
-  /// requests go; `updater` checks for a newer version, none when nil.
+  /// requests go; `updater` checks for a newer version, none when nil;
+  /// `snapshot` is where each finished round is written for scripts, none
+  /// when nil.
   public init(
     now: @escaping @MainActor () -> Date = Date.init, timeZone: TimeZone = .current,
     locale: Locale = .current,
     restoresFrame: Bool = true, remembersQueue: Bool = true, github: GitHub = .live(),
-    updater: Updater? = .live()
+    updater: Updater? = .live(), snapshot: URL? = nil
   ) {
     model = InboxModel(github: github)
+    if let snapshot {
+      // A failed write only leaves the last one in place; the window is unaffected.
+      model.settled = { inbox in try? writeSnapshot(inbox, at: now(), to: snapshot) }
+    }
     self.updater = updater
     self.remembersQueue = remembersQueue
     self.now = now

@@ -70,6 +70,10 @@ public let usage: String = {
     Queues, in priority order; an item is listed only in the first that has it:
     \(queues.joined(separator: "\n"))
 
+    The window writes the same report of every queue to
+    ~/Library/Caches/gh-inbox/inbox.json each time a refresh finishes, with
+    generated_at, for scripts that would rather not fetch.
+
     Exits 0 when every queue loaded, 1 when any failed (the JSON still has
     what did load, and each failure's reason), 2 for a usage error. With
     --queue, a failure in an earlier queue counts too, and the queue's
@@ -170,8 +174,15 @@ private func item(_ inbox: Inbox, _ item: Item) -> JSON {
     case .organization: "organization"
     case .unknown: nil
     }
+  // Every queue the item matched, not just the one it shows in: a PR
+  // pushed to since your review and also re-requested of you shows in
+  // Back to me, and only this says it was asked again.
+  let matching = inbox.sections.indices.filter { s in
+    inbox.sections[s].items.contains { $0.url == item.url }
+  }
   return [
     "url": .string(item.url),
+    "in_queues": .array(matching.map { .string(sections[$0].key) }),
     "repository": .string(item.repository.nameWithOwner),
     "owner_type": owner,
     "number": .int(item.number),
@@ -196,11 +207,41 @@ public func runJSON(queue: Int?, limit: Int, github: GitHub = .live()) -> Int32 
   }
   done.wait()
   guard let (json, complete) = result.value else { return 1 }
+  FileHandle.standardOutput.write(encoded(json))
+  return complete ? 0 : 1
+}
+
+private func encoded(_ json: JSON) -> Data {
   let encoder = JSONEncoder()
   encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-  let data = (try? encoder.encode(json)) ?? Data("null".utf8)
-  FileHandle.standardOutput.write(data + Data("\n".utf8))
-  return complete ? 0 : 1
+  return ((try? encoder.encode(json)) ?? Data("null".utf8)) + Data("\n".utf8)
+}
+
+// The window's latest round, left on disk for scripts that want it without
+// a request of their own.
+
+/// Where the window writes its latest round: inside the user's caches
+/// folder, `~/Library/Caches` on macOS.
+public let cacheURL: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+  .appendingPathComponent("gh-inbox", isDirectory: true).appendingPathComponent("inbox.json")
+
+/// The `--json` report of every queue, whichever owner tab the window
+/// shows, with `generated_at`: when the round it holds finished.
+public func snapshot(_ inbox: Inbox, at date: Date) -> JSON {
+  var all = inbox
+  all.ownerFilter = .all
+  var json = report(all, queue: nil).json
+  json["generated_at"] = .string(date.formatted(.iso8601))
+  return json
+}
+
+/// Replaces `url` with the inbox's snapshot in one step, so a reader never
+/// sees half a file. Nothing is written before any queue has loaded.
+public func writeSnapshot(_ inbox: Inbox, at date: Date, to url: URL) throws {
+  guard inbox.anyLoaded else { return }
+  try FileManager.default.createDirectory(
+    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+  try encoded(snapshot(inbox, at: date)).write(to: url, options: .atomic)
 }
 
 private final class Box: @unchecked Sendable {
