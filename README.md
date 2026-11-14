@@ -51,12 +51,13 @@ your token.
 
 ## Using it
 
-- The sidebar lists six queues: PRs whose author pushed since you
-  reviewed them without approving, review requests asked of you by name, those that
-  came through your teams, your open PRs, what's assigned to you, and
-  what's left in repos you own. An item shows once, in the first queue
-  that has it. `cmd-1` to `cmd-6` pick a queue; Tab, or the left and
-  right arrows, move between the sidebar and the list.
+- The sidebar lists five queues: what's asked of you (PRs whose author
+  pushed since you reviewed them without approving, then review requests
+  asked of you by name), those that came through your teams, your open
+  PRs, what's assigned to you, and what's left in repos you own. An item
+  shows once, in the first queue that has it. `cmd-1` to `cmd-5` pick a
+  queue; Tab, or the left and right arrows, move between the sidebar and
+  the list.
 - A long queue ends in "Load 25 more" and "Open on GitHub"; `cmd-l` and
   `shift-cmd-o` do the same from the keyboard.
 - Your open PRs are grouped: approved, changes requested, awaiting review,
@@ -80,7 +81,7 @@ installing:
 
 ```bash
 /Applications/GhInbox.app/Contents/MacOS/gh-inbox --json
-swift run -q gh-inbox --json --queue back-to-me --limit 50
+swift run -q gh-inbox --json --queue asked-of-me --limit 50
 swift run -q gh-inbox --help    # every queue's key and what it holds
 ```
 
@@ -88,16 +89,21 @@ Only the JSON goes to stdout, so it pipes cleanly. It runs one refresh,
 check states included. Updating the app updates it
 too, so a symlink to the installed path on your PATH keeps working.
 
-Each queue in `queues` has its `key` and `name`, its `items`, how many GitHub
-`matched`, whether the list is `truncated` and why fewer show
-(`shortfall`), and an `error` and `warnings` when something didn't load.
+`queues` lists the window's queues. Each has its `key` and `name`, its
+`items`, how many GitHub `matched`, whether a list is `truncated`, and an
+`error` and `warnings` when something didn't load. Its `searches` hold each
+GitHub search behind it: one for most queues, two for `asked-of-me`, whose
+`part` is `pushed-since-your-review` or `requested` (null in a queue of
+one search), each with its own `loaded`, `error`, `matched`, `truncated`,
+why fewer show (`shortfall`) and `search_url`.
 An item shows once, in the first queue that has it, as in the window; with
 `--queue`, the earlier queues are still fetched to decide that, and one
 that fails is named in the queue's `warnings` and exits 1. Each item has
 its `url`, `repository`, `number`, `title`, `author`, `type`
 (`pull_request` or `issue`), `in_queues` (every queue it matched, the one it
-shows in first: a PR pushed since your review that's also re-requested of
-you shows in Back to me, with `asked-of-me` second), `draft`, `review` (`approved`,
+shows in first), `parts` in `asked-of-me` (every part whose search returned
+it, the one it shows under first: a PR pushed since your review that's also
+re-requested of you reads `pushed-since-your-review`, `requested`), `draft`, `review` (`approved`,
 `changes_requested`, `review_required` or null), `checks` (`passing`,
 `failing`, `pending`, `none`, `unknown`, or null for an issue), `route`
 (how a review reached you, when known) and `updated_at`.

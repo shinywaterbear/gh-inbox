@@ -13,14 +13,15 @@ struct HeadlessTests {
     #expect(command(["-NSDocumentRevisionsDebugMode", "YES"]) == .window)
     #expect(command(["--help"]) == .help)
     #expect(command(["--json"]) == .json(queue: nil, limit: pageStep))
-    #expect(command(["--json", "--queue", "back-to-me", "--limit=50"]) == .json(queue: 0, limit: 50))
+    #expect(command(["--json", "--queue", "asked-of-me", "--limit=50"]) == .json(queue: 1, limit: 50))
     #expect(command(["--queue=my-open-prs", "--json"]) == .json(queue: 3, limit: pageStep))
   }
 
   @Test func aMistakeIsAUsageErrorNotTheWindow() {
     for arguments in [
       ["--json", "--queue", "inbox"], ["--json", "--queue"], ["--json", "--limit", "0"],
-      ["--json", "--limit", "101"], ["--json", "--verbose"], ["--queue", "back-to-me"],
+      ["--json", "--limit", "101"], ["--json", "--verbose"], ["--queue", "asked-of-me"],
+      ["--json", "--queue", "back-to-me"],
       ["--json", ""], ["--json", "="], ["--json", "--queue="], ["--json=yes"],
     ] {
       guard case .invalid = command(arguments) else {
@@ -32,7 +33,7 @@ struct HeadlessTests {
 
   @Test func everyQueueHasItsOwnKey() {
     #expect(Set(sections.map(\.key)).count == sections.count)
-    for spec in sections { #expect(usage.contains(spec.key)) }
+    for s in queueSections { #expect(usage.contains(sections[s].key)) }
   }
 
   @Test func reportsEachQueueOnceWithChecksAndCompleteness() async throws {
@@ -43,8 +44,8 @@ struct HeadlessTests {
     #expect(complete)
     #expect(json["login"] == "example-user" && json["host"] == "github.com")
     guard case .array(let queues) = json["queues"] else { throw Failure("no queues") }
-    #expect(queues.map { $0["key"].string } == sections.map(\.key))
-    let mine = queues[3]
+    #expect(queues.map { $0["key"].string } == queueSections.map { sections[$0].key })
+    let mine = queues[2]
     #expect(mine["loaded"] == true && mine["matched"] == 3 && mine["error"] == .null)
     guard case .array(let items) = mine["items"] else { throw Failure("no items") }
     #expect(items.count == 3)
@@ -62,7 +63,7 @@ struct HeadlessTests {
     let body = FileManager.default.contents(atPath: recorded)!
     let server = FakeGitHub { _ in .reply(status: 200, headers: [:], body: body) }
     let inbox = await loadOnce(server.github(), limit: 25)
-    let all = report(inbox, queue: nil).json["queues"][5]
+    let all = report(inbox, queue: nil).json["queues"][4]
     let one = report(inbox, queue: 5).json["queues"]
     #expect(one == [all])
   }
@@ -70,11 +71,12 @@ struct HeadlessTests {
   @Test func aFailureStillReportsAndSaysWhy() async {
     let server = answering(.fail(.notConnectedToInternet))
     let inbox = await loadOnce(server.github(), limit: 25)
-    let (json, complete) = report(inbox, queue: 0)
+    let (json, complete) = report(inbox, queue: 1)
     #expect(!complete)
     #expect(json["login"] == .null)
     #expect(json["queues"][0]["loaded"] == false)
-    #expect(json["queues"][0]["error"].string?.hasPrefix("could not reach GitHub") == true)
+    #expect(
+      json["queues"][0]["error"].string?.contains(": could not reach GitHub") == true, "names its search")
     #expect(!json.text.contains(server.token))
   }
 
@@ -90,10 +92,16 @@ struct HeadlessTests {
     let (later, complete) = report(inbox, queue: 4)
     #expect(!complete)
     #expect(later["queues"][0]["loaded"] == true && later["queues"][0]["error"] == .null)
-    #expect(later["queues"][0]["warnings"][0].string?.hasPrefix("Back to me didn't load") == true)
-    #expect(report(inbox, queue: 0).complete == false)
+    #expect(
+      later["queues"][0]["warnings"][0].string?.hasPrefix(
+        "Asked of me (pushed since your review) didn't load")
+        == true)
+    let (asked, _) = report(inbox, queue: 1)
+    #expect(asked["queues"][0]["error"].string?.hasPrefix("Pushed since your review: ") == true)
+    #expect(asked["queues"][0]["searches"][0]["loaded"] == false)
+    #expect(asked["queues"][0]["searches"][1]["loaded"] == true)
     let (all, _) = report(inbox, queue: nil)
-    #expect(all["queues"][4]["warnings"] == [], "listing every queue shows the failure where it happened")
+    #expect(all["queues"][3]["warnings"] == [], "listing every queue shows the failure where it happened")
   }
 
   @Test func anItemNamesEveryQueueItMatched() async throws {
@@ -110,7 +118,8 @@ struct HeadlessTests {
         guard case .array(let keys) = item["in_queues"] else { throw Failure("no in_queues") }
         let names = keys.compactMap(\.string)
         #expect(names.first == queue["key"].string, "the queue it shows in is the first it matched")
-        #expect(names == sections.map(\.key).filter(names.contains), "in the window's order")
+        #expect(
+          names == queueSections.map { sections[$0].key }.filter(names.contains), "in the window's order")
         listed += 1
       }
     }

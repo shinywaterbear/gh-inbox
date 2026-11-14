@@ -375,7 +375,7 @@ struct AccountTests {
     inbox.refresh()
     answerMembership(&inbox, .none)
     #expect(!queues(inbox).contains { $0.section == teamSection })
-    #expect(queues(inbox).count == sections.count - 1)
+    #expect(queues(inbox).count == queueSections.count - 1)
   }
 
   @Test func aMembershipAnswerForTheOldAccountIsDropped() {

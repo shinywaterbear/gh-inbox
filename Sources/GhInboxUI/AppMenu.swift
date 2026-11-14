@@ -36,8 +36,8 @@ public func appMenu(for target: InboxController, about: (action: Selector, targe
     .separator(),
   ]
   for (index, title) in InboxController.queueTitles.enumerated() {
-    let queue = item(title, #selector(InboxController.showQueue(_:)), "\(index + 1)", target: target)
-    queue.tag = index
+    let queue = item(title.name, #selector(InboxController.showQueue(_:)), "\(index + 1)", target: target)
+    queue.tag = title.section
     view.append(queue)
   }
   view += [

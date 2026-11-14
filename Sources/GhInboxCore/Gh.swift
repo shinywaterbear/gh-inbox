@@ -20,6 +20,10 @@ public struct SectionSpec: Sendable {
   let qualifier: String
   var ranking = Ranking.attention
   var routing = Routing.notAsked
+  /// The queue it shows in, by key, when it isn't a queue of its own.
+  var shownIn: String?
+  /// Its group's heading in a queue it shares.
+  var part: String?
 }
 
 /// Display order, which is also priority: an item shows in the first queue
@@ -35,12 +39,14 @@ public let sections: [SectionSpec] = [
     about: "PRs you reviewed, not approved, that the author has pushed to since",
     empty: "Nothing you reviewed has been pushed since.",
     scope: "is:open is:pr", qualifier: "reviewed-by:@me -author:@me -review:approved",
-    routing: .returned),
+    routing: .returned, shownIn: "asked-of-me", part: "Pushed since your review"),
   // GitHub matches `user-review-requested` only against the viewer by name.
   SectionSpec(
     alias: "direct", key: "asked-of-me", name: "Asked of me", group: "Review",
-    about: "PRs whose review is requested of you by name", empty: "No one has asked you by name.",
-    scope: "is:open is:pr", qualifier: "user-review-requested:@me", routing: .allDirect),
+    about:
+      "PRs you reviewed, not approved, that the author has pushed to since, then PRs whose review is requested of you by name",
+    empty: "No one has asked you by name, and nothing you reviewed has been pushed since.",
+    scope: "is:open is:pr", qualifier: "user-review-requested:@me", routing: .allDirect, part: "Requested"),
   // script/check-review-split found it disjoint from the queue above and,
   // with it, equal to `review-requested:@me` on a busy work account. If it
   // ever misbehaves, plain `review-requested:@me` works too: a PR also
@@ -66,6 +72,21 @@ public let sections: [SectionSpec] = [
 
 /// Requests through teams, hidden when the account can't be on one.
 public let teamSection = 2
+
+/// The window's queues, each by its own section: every section not shown
+/// in another's queue.
+public let queueSections = sections.indices.filter { sections[$0].shownIn == nil }
+
+/// The sections a queue lists, in order: those shown in it, then its own.
+public func members(_ queue: Int) -> [Int] {
+  sections.indices.filter { $0 == queue || sections[$0].shownIn == sections[queue].key }
+}
+
+/// The queue that lists a section.
+public func queue(of section: Int) -> Int {
+  guard let key = sections[section].shownIn else { return section }
+  return sections.firstIndex { $0.key == key } ?? section
+}
 
 /// Makes the first page the newest activity.
 let order = "sort:updated-desc"

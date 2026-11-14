@@ -49,10 +49,10 @@ struct DisplayTests {
     let inbox = loaded([truncated([pr("a", "h")], 60), ok([]), ok([issue("b")]), ok([]), ok([])])
     let shown = rows(inbox, now: at())
     #expect(
-      shown.map(\.id).prefix(3) == [.heading(section: 0), .item(section: 0, url: "a"), .cutOff(section: 0)])
+      shown.map(\.id).prefix(3) == [.heading(section: 1), .item(section: 0, url: "a"), .cutOff(section: 0)])
     #expect(
       shown.first?.content
-        == .heading(HeadingRow(name: "Back to me", mark: .count(1, dim: false), ruled: false)))
+        == .heading(HeadingRow(name: "Asked of me", mark: .count(1, dim: false), ruled: false)))
     #expect(
       shown[2].content
         == .cutOff(
@@ -60,7 +60,8 @@ struct DisplayTests {
             section: 0, more: .button("Load 25 more"), note: "Showing the newest 1 of 60 matches",
             url: searchURL(0, host: "github.com"))))
     #expect(
-      shown[3].content == .heading(HeadingRow(name: "Asked of me", mark: .count(0, dim: true), ruled: true)))
+      shown[3].content == .heading(HeadingRow(name: "Via my teams", mark: .count(1, dim: false), ruled: true))
+    )
     #expect(shown.compactMap { if case .item(let item) = $0.content { item.owner } else { nil } }.isEmpty)
   }
 
@@ -78,7 +79,42 @@ struct DisplayTests {
     }
     #expect(cut.note == "1 shown of 2 matches; 1 in other queues")
     #expect(cut.more == .none)
-    #expect(queues(inbox).map(\.count) == [0, 1, 2, 0, 0, 0], "the sidebar counts GitHub's totals")
+    #expect(queues(inbox).map(\.count) == [1, 2, 0, 0, 0], "the sidebar counts GitHub's totals")
+  }
+
+  /// Back to me is a part of Asked of me: each search under its own
+  /// heading once both have rows, and none while only one has.
+  @Test func askedOfMeShowsEachSearchUnderItsHeading() {
+    let both = loaded([ok([pr("back", "h")]), ok([pr("asked", "h")]), ok([]), ok([]), ok([]), ok([])])
+    #expect(
+      rows(both, queue: 1, now: at()).map(\.id) == [
+        .part(section: 0), .item(section: 0, url: "back"), .part(section: 1), .item(section: 1, url: "asked"),
+      ])
+    let names = rows(both, queue: 1, now: at()).compactMap { row -> String? in
+      if case .heading(let h) = row.content { h.name } else { nil }
+    }
+    #expect(names == ["Pushed since your review", "Requested"])
+    #expect(queues(both).first?.section == 1, "Back to me isn't a queue of its own")
+    #expect(queues(both).first?.count == 2)
+    let one = loaded([ok([]), ok([pr("asked", "h")]), ok([]), ok([]), ok([]), ok([])])
+    #expect(rows(one, queue: 1, now: at()).map(\.id) == [.item(section: 1, url: "asked")])
+    #expect(queue(of: 0) == 1 && members(1) == [0, 1])
+  }
+
+  /// `--json` lists the window's queues; a shared one names its searches,
+  /// and an item every one that returned it.
+  @Test func jsonNamesTheSearchesOfASharedQueue() {
+    let both = pr("both", "h")
+    let inbox = loaded([ok([both]), ok([both, pr("asked", "h")]), ok([]), ok([]), ok([]), ok([])])
+    let asked = report(inbox, queue: nil).json["queues"][0]
+    #expect(asked["key"] == "asked-of-me" && asked["matched"] == 3)
+    #expect(asked["searches"][0]["part"] == "pushed-since-your-review")
+    #expect(asked["searches"][1]["part"] == "requested")
+    #expect(asked["items"][0]["parts"] == ["pushed-since-your-review", "requested"], "asked again too")
+    #expect(asked["items"][0]["in_queues"] == ["asked-of-me"])
+    #expect(asked["items"][1]["parts"] == ["requested"])
+    let team = report(inbox, queue: teamSection).json["queues"][0]
+    #expect(team["searches"][0]["part"] == .null, "a queue of one search has no parts")
   }
 
   @Test func myOpenPrsShowTheirGroupsWithoutRepeatingThemOnRows() {
@@ -110,8 +146,12 @@ struct DisplayTests {
     while let ticket = inbox.nextJob() { tickets.append(ticket) }
     #expect(queues(inbox).prefix(4).map(\.status) == [.loading, .loading, .loading, .loading])
     inbox.finish(tickets[0], .section(ok([issue("x")])), now: .now)
+    #expect(queues(inbox)[0].status == .loading, "until each of its searches has loaded")
+    #expect(queues(inbox)[0].count == nil)
     inbox.finish(tickets[1], .section(ok([]).failing), now: .now)
-    #expect(queues(inbox).prefix(2).map(\.status) == [.ready, .failed])
+    inbox.finish(tickets[2], .section(ok([]).failing), now: .now)
+    #expect(queues(inbox).prefix(2).map(\.status) == [.failed, .failed], "one search never loaded")
+    #expect(queues(inbox)[0].count == nil, "an unknown total isn't zero")
     #expect(emptyText(inbox, queue: 1) == nil, "a failure isn't emptiness")
     inbox.refresh()
     while let ticket = inbox.nextJob() {
@@ -163,7 +203,7 @@ struct DisplayTests {
 
   @Test func anEmptyQueueSaysSoAndALoadedEmptyOneIsZero() {
     let inbox = loaded([ok([]), ok([]), ok([]), ok([]), ok([]), ok([])])
-    #expect(emptyText(inbox, queue: 1) == "No one has asked you by name.")
+    #expect(emptyText(inbox, queue: 1) == sections[1].empty)
     #expect(queues(inbox)[0].count == 0)
   }
 
@@ -199,7 +239,8 @@ struct DisplayTests {
     let before = rows(failing, now: at(then, noon))
     let after = rows(failing, now: at(then + .seconds(180), noon))
     let error = GhError.server("502").described
-    #expect(notices(before).first?.text == "\(error) Showing results from just now.")
+    #expect(
+      notices(before).first?.text == "Pushed since your review: \(error) Showing results from just now.")
     #expect(notices(after).first?.text.hasSuffix("from 3m ago.") == true)
     #expect(changes(from: before, to: after) == RowChanges(removed: [], inserted: [], updated: [1]))
     #expect(changes(from: after, to: after).isEmpty)
@@ -288,12 +329,12 @@ struct DisplayTests {
   }
 
   @Test func thePinnedHeadingIsTheNearestAboveTheFirstVisibleRow() {
-    let inbox = loaded([ok([pr("a", "h"), pr("b", "h")]), ok([pr("c", "h")]), ok([]), ok([]), ok([])])
+    let inbox = loaded([ok([]), ok([]), ok([pr("a", "h"), pr("b", "h")]), ok([pr("c", "h")]), ok([])])
     let shown = rows(inbox, now: at())
     #expect(pinnedHeading(shown, firstVisible: 0) == 0)
-    #expect(pinnedHeading(shown, firstVisible: 2) == 0)
-    #expect(pinnedHeading(shown, firstVisible: 3) == 3)
-    #expect(pinnedHeading(shown, firstVisible: 4) == 3)
+    #expect(pinnedHeading(shown, firstVisible: 2) == 1)
+    #expect(pinnedHeading(shown, firstVisible: 3) == 1)
+    #expect(pinnedHeading(shown, firstVisible: 4) == 4)
     #expect(pinnedHeading(shown, firstVisible: shown.count) == nil)
   }
 

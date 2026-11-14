@@ -182,9 +182,9 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
 
   // MARK: Queues
 
-  /// The queues' names, in order, as menu titles; a menu item's tag picks
-  /// one for `showQueue(_:)`.
-  public static let queueTitles = GhInboxCore.sections.map(\.name)
+  /// The queues' names, in order, as menu titles, each with the section a
+  /// menu item's tag names for `showQueue(_:)`.
+  public static let queueTitles = queueSections.map { (section: $0, name: GhInboxCore.sections[$0].name) }
 
   /// Shows a queue's rows, and remembers it for the account.
   public func select(queue section: Int) {
@@ -204,8 +204,13 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   /// keys skip that row, so a near-miss click can't act.
   public static let loadMoreTitle = "Load \(pageStep) More"
 
+  /// The first of the queue's searches with more to load.
+  private var moreInQueue: Int? {
+    members(queue).first { inbox.sections[$0].canLoadMore && !inbox.sections[$0].expanding }
+  }
+
   @objc public func loadMoreInQueue(_ sender: Any?) {
-    loadMore(queue)
+    if let section = moreInQueue { loadMore(section) }
   }
 
   @objc public func openQueueOnGitHub(_ sender: Any?) {
@@ -230,7 +235,7 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
     }
     let saved = remembersQueue ? UserDefaults.standard.string(forKey: queueKey(identity)) : nil
     if let saved, let section = GhInboxCore.sections.firstIndex(where: { $0.name == saved }) {
-      queue = section
+      queue = GhInboxCore.queue(of: section)
     }
   }
 
@@ -324,8 +329,7 @@ public final class InboxController: NSWindowController, NSWindowDelegate, NSTool
   public func validateMenuItem(_ item: NSMenuItem) -> Bool {
     switch item.action {
     case #selector(loadMoreInQueue(_:)):
-      let section = inbox.sections[queue]
-      return presence != .closed && section.canLoadMore && !section.expanding
+      return presence != .closed && moreInQueue != nil
     case #selector(openQueueOnGitHub(_:)):
       return presence != .closed && inbox.identity != nil
     case #selector(showQueue(_:)):

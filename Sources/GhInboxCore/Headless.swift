@@ -7,7 +7,7 @@ import Foundation
 public enum Command: Equatable, Sendable {
   case window
   case help
-  /// `queue` is a `sections` index; nil prints every queue.
+  /// `queue` is a queue's own `sections` index (`queueSections`); nil prints every queue.
   case json(queue: Int?, limit: Int)
   case invalid(String)
 }
@@ -30,8 +30,9 @@ public func command(_ arguments: [String]) -> Command {
     case "--json" where inline == nil:
       json = true
     case "--queue":
-      guard let name = value(), let index = sections.firstIndex(where: { $0.key == name }) else {
-        return .invalid("--queue takes one of: \(sections.map(\.key).joined(separator: ", "))")
+      guard let name = value(), let index = queueSections.first(where: { sections[$0].key == name }) else {
+        return .invalid(
+          "--queue takes one of: \(queueSections.map { sections[$0].key }.joined(separator: ", "))")
       }
       queue = index
     case "--limit":
@@ -53,8 +54,9 @@ private func flagAndValue(_ argument: String) -> (flag: String, value: String?) 
 }
 
 public let usage: String = {
-  let width = sections.map(\.key.count).max() ?? 0
-  let queues = sections.map {
+  let listed = queueSections.map { sections[$0] }
+  let width = listed.map(\.key.count).max() ?? 0
+  let queues = listed.map {
     "  \($0.key.padding(toLength: width, withPad: " ", startingAt: 0))  \($0.about)"
   }
   return """
@@ -112,37 +114,56 @@ public func loadOnce(_ github: GitHub, limit: Int) async -> Inbox {
 public func report(_ inbox: Inbox, queue: Int?) -> (json: JSON, complete: Bool) {
   let visible = inbox.visible()
   let host = inbox.identity?.host ?? "github.com"
-  let listed = queue.map { [$0] } ?? Array(sections.indices)
+  let listed = queue.map { [$0] } ?? queueSections
   func failure(_ s: Int) -> GhError? {
     inbox.sections[s].error ?? (inbox.sections[s].loaded ? nil : GhError.cancelled)
   }
-  let needed = queue.map { Array(0...$0) } ?? Array(sections.indices)
+  let needed = queue.map { Array(0...members($0).last!) } ?? Array(sections.indices)
   let complete = needed.allSatisfy { failure($0) == nil }
-  let queues: [JSON] = listed.map { s in
-    let section = inbox.sections[s]
-    let shown = visible[s].map { section.items[$0] }
-    let error = failure(s)
-    let short = section.loaded && (section.truncated || shown.count < section.matched)
+  let queues: [JSON] = listed.map { q in
+    let parts = members(q)
+    // Names the search a message is about, where the queue has several.
+    func named(_ s: Int, _ text: String) -> String {
+      parts.count > 1 ? (sections[s].part.map { "\($0): " } ?? "") + text : text
+    }
+    let error = parts.lazy.compactMap { s in failure(s).map { named(s, $0.described) } }.first
     // Shown only with `--queue`; listing every queue shows each failure.
     let earlier =
       queue == nil
       ? []
-      : (0..<s).compactMap { e in
+      : (0..<parts[0]).filter { !parts.contains($0) }.compactMap { e in
         failure(e).map {
-          "\(sections[e].name) didn't load, so items it would list may show here instead: \($0.described)"
+          "\(title(e)) didn't load, so items it would list may show here instead: \($0.described)"
         }
       }
+    let warnings = parts.flatMap { s in inbox.sections[s].warnings.map { named(s, $0.described) } }
+    let loaded = parts.allSatisfy { inbox.sections[$0].loaded }
+    let searches: [JSON] = parts.map { s in
+      let section = inbox.sections[s]
+      let short = section.loaded && (section.truncated || visible[s].count < section.matched)
+      return [
+        "part": parts.count > 1 ? partKey(s).map { .string($0) } ?? .null : .null,
+        "loaded": .bool(section.loaded),
+        "error": failure(s).map { .string($0.described) } ?? .null,
+        "matched": section.loaded ? .int(section.matched) : nil,
+        "truncated": .bool(section.truncated),
+        "shortfall": short ? .string(shortfall(inbox, queue: s)) : nil,
+        "search_url": .string(searchURL(s, host: host)),
+      ]
+    }
+    let items = parts.flatMap { s in
+      visible[s].map { item(inbox, inbox.sections[s].items[$0], parts: parts.count > 1 ? parts : []) }
+    }
     return [
-      "key": .string(sections[s].key),
-      "name": .string(sections[s].name),
-      "loaded": .bool(section.loaded),
-      "error": error.map { .string($0.described) } ?? .null,
-      "warnings": .array((earlier + section.warnings.map(\.described)).map { .string($0) }),
-      "matched": section.loaded ? .int(section.matched) : nil,
-      "truncated": .bool(section.truncated),
-      "shortfall": short ? .string(shortfall(inbox, queue: s)) : nil,
-      "search_url": .string(searchURL(s, host: host)),
-      "items": .array(shown.map { item(inbox, $0) }),
+      "key": .string(sections[q].key),
+      "name": .string(sections[q].name),
+      "loaded": .bool(loaded),
+      "error": error.map { .string($0) } ?? .null,
+      "warnings": .array((earlier + warnings).map { .string($0) }),
+      "matched": loaded ? .int(parts.map { inbox.sections[$0].matched }.reduce(0, +)) : nil,
+      "truncated": .bool(parts.contains { inbox.sections[$0].truncated }),
+      "searches": .array(searches),
+      "items": .array(items),
     ]
   }
   let json: JSON = [
@@ -153,7 +174,20 @@ public func report(_ inbox: Inbox, queue: Int?) -> (json: JSON, complete: Bool) 
   return (json, complete)
 }
 
-private func item(_ inbox: Inbox, _ item: Item) -> JSON {
+/// A search as a person reads it: its queue, and its part of a shared one.
+private func title(_ s: Int) -> String {
+  let name = sections[GhInboxCore.queue(of: s)].name
+  return members(GhInboxCore.queue(of: s)).count > 1
+    ? "\(name) (\(sections[s].part?.lowercased() ?? ""))" : name
+}
+
+/// A shared queue's search, as JSON names it: its heading in the window.
+private func partKey(_ s: Int) -> String? {
+  sections[s].part?.lowercased().replacingOccurrences(of: " ", with: "-")
+}
+
+/// `parts`: the searches of the item's queue, when it has several.
+private func item(_ inbox: Inbox, _ item: Item, parts: [Int]) -> JSON {
   let review: JSON =
     switch item.review {
     case .approved: "approved"
@@ -174,15 +208,21 @@ private func item(_ inbox: Inbox, _ item: Item) -> JSON {
     case .organization: "organization"
     case .unknown: nil
     }
-  // Every queue the item matched, not just the one it shows in: a PR
-  // pushed to since your review and also re-requested of you shows in
-  // Back to me, and only this says it was asked again.
+  // Every queue and search the item matched, not just where it shows: a
+  // PR pushed to since your review and also re-requested of you shows
+  // under the first, and only `parts` says it was asked again.
   let matching = inbox.sections.indices.filter { s in
     inbox.sections[s].items.contains { $0.url == item.url }
   }
+  var queues: [Int] = []
+  for s in matching where !queues.contains(GhInboxCore.queue(of: s)) {
+    queues.append(GhInboxCore.queue(of: s))
+  }
   return [
     "url": .string(item.url),
-    "in_queues": .array(matching.map { .string(sections[$0].key) }),
+    "in_queues": .array(queues.map { .string(sections[$0].key) }),
+    "parts": parts.isEmpty
+      ? nil : .array(matching.filter(parts.contains).compactMap { partKey($0).map(JSON.string) }),
     "repository": .string(item.repository.nameWithOwner),
     "owner_type": owner,
     "number": .int(item.number),
