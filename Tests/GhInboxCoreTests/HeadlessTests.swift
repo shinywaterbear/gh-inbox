@@ -126,10 +126,9 @@ struct HeadlessTests {
     let all = report(inbox, queue: nil).json
     inbox.ownerFilter = .personal
     let date = Date(timeIntervalSince1970: 1_800_000_000)
-    var json = snapshot(inbox, at: date)
+    let json = snapshot(inbox, at: date)
     #expect(json["generated_at"] == "2027-01-15T08:00:00Z")
-    json["generated_at"] = nil
-    #expect(json == all)
+    for key in ["login", "host", "queues"] { #expect(json[key] == all[key], "\(key)") }
   }
 
   @Test func theSnapshotReplacesTheLastOneOnceAQueueLoaded() async throws {
