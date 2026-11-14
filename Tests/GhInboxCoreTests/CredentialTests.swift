@@ -145,6 +145,19 @@ struct InboxModelTests {
     #expect(asked.count == 2)
   }
 
+  @Test func aRoundSettlesOnceEveryJobIsDone() async throws {
+    let server = FakeGitHub { answer($0.query, login: "me") }
+    let model = InboxModel(github: server.github())
+    var settled: [Bool] = []
+    model.settled = { settled.append($0.anyBusy || !$0.sections.allSatisfy(\.loaded)) }
+    model.refresh()
+    try await settle(model)
+    #expect(settled == [false], "once per round, after the last job")
+    model.refresh()
+    try await settle(model)
+    #expect(settled == [false, false])
+  }
+
   @Test func aFailedCredentialFailsTheRound() async throws {
     let github = GitHub(session: answering(.hang).github().session) { .failure(.notLoggedIn) }
     let model = InboxModel(github: github)

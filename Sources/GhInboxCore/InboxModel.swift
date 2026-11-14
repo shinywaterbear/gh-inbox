@@ -5,6 +5,8 @@ public final class InboxModel {
   public private(set) var inbox = Inbox()
   /// Called after every change worth drawing.
   public var changed: @MainActor () -> Void = {}
+  /// Called when the last job in flight finishes and none is queued.
+  public var settled: @MainActor (Inbox) -> Void = { _ in }
   private let github: GitHub
   private var tasks: [UInt64: Task<Void, Never>] = [:]
   private var nextTask: UInt64 = 0
@@ -63,6 +65,7 @@ public final class InboxModel {
       inbox.refresh()
     }
     pump()
+    if !inbox.anyBusy { settled(inbox) }
   }
 
   /// A job from an older round takes the newest credential rather than

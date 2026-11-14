@@ -1,4 +1,5 @@
 import AppKit
+import GhInboxCore
 import GhInboxUI
 
 @MainActor
@@ -7,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     setDockIconOutsideBundle()
-    let controller = InboxController()
+    let controller = InboxController(snapshot: cacheURL)
     NSApp.mainMenu = appMenu(for: controller, about: (#selector(showAbout(_:)), self))
     self.controller = controller
     controller.showWindow(nil)
